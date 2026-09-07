@@ -43,7 +43,7 @@ const outboundMap = new Map<string,{locationId:string;ghlMessageId:string}>();
 let registry: Registry = { instances:{}, ghl:{} };
 
 function auth(req:express.Request,res:express.Response,next:express.NextFunction){
-  if(req.path === '/health') return next();
+  if(req.path === '/' || req.path === '/health') return next();
   if(!INTERNAL_API_KEY || req.header('x-internal-api-key') !== INTERNAL_API_KEY) return res.status(401).json({error:'Unauthorized'});
   next();
 }
@@ -166,6 +166,7 @@ async function startInstance(id:string){
   });
 }
 
+app.get('/',(_req,res)=>res.json({service:'ghl-whatsapp-bridge-worker',ok:true,health:'/health'}));
 app.get('/health',(_req,res)=>res.json({ok:true,instances:Object.keys(registry.instances).length}));
 app.get('/instances',(_req,res)=>res.json({instances:Object.values(registry.instances).map(({id,name,locationId,status,phone,createdAt,qr})=>({id,name,locationId,status,phone,createdAt,qr:qr||null}))}));
 app.post('/instances',async(req,res)=>{try{const {locationId,name='WhatsApp Instance'}=req.body||{};if(!locationId)return res.status(400).json({error:'locationId is required'});if(!registry.ghl[locationId])log.warn({locationId},'Creating instance before GHL OAuth connection');const id=crypto.randomUUID();registry.instances[id]={id,name,locationId,status:'starting',createdAt:new Date().toISOString(),qr:null};await save();await startInstance(id);res.json({instance:registry.instances[id]});}catch(e){res.status(500).json({error:e instanceof Error?e.message:'Failed'})}});

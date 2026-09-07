@@ -81,7 +81,7 @@ const qrCache = new Map();
 const outboundMap = new Map();
 let registry = { instances: {}, ghl: {} };
 function auth(req, res, next) {
-    if (req.path === '/health')
+    if (req.path === '/' || req.path === '/health')
         return next();
     if (!INTERNAL_API_KEY || req.header('x-internal-api-key') !== INTERNAL_API_KEY)
         return res.status(401).json({ error: 'Unauthorized' });
@@ -268,6 +268,7 @@ async function startInstance(id) {
         }
     });
 }
+app.get('/', (_req, res) => res.json({ service: 'ghl-whatsapp-bridge-worker', ok: true, health: '/health' }));
 app.get('/health', (_req, res) => res.json({ ok: true, instances: Object.keys(registry.instances).length }));
 app.get('/instances', (_req, res) => res.json({ instances: Object.values(registry.instances).map(({ id, name, locationId, status, phone, createdAt, qr }) => ({ id, name, locationId, status, phone, createdAt, qr: qr || null })) }));
 app.post('/instances', async (req, res) => { try {
