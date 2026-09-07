@@ -166,7 +166,7 @@ app.post('/integrations/ghl/connect',async(req,res)=>{try{const {locationId,acce
 
 app.post('/webhooks/ghl/outbound',async(req,res)=>{
   try{
-    const raw=req.rawBody || JSON.stringify(req.body); const body=providerBody(raw,req.header('x-ghl-signature')||'');
+    const raw = (req as express.Request & { rawBody?: string }).rawBody || JSON.stringify(req.body);
     const locationId=body.locationId; const i=Object.values(registry.instances).find(x=>x.locationId===locationId); if(!i)return res.status(404).json({error:'No WhatsApp instance for this location'});
     const to=body.phone || body.toNumber || body.to || body.contact?.phone; const text=body.message || body.text; if(!to||!text)return res.status(400).json({error:'Outbound payload missing phone or message'});
     const sock=sockets.get(i.id); if(!sock)return res.status(409).json({error:'WhatsApp instance not connected'});
