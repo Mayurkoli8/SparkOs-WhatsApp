@@ -1,0 +1,12 @@
+import { NextRequest,NextResponse } from 'next/server';
+export async function GET(req:NextRequest){
+ const code=req.nextUrl.searchParams.get('code');if(!code)return NextResponse.json({error:'Missing OAuth code'},{status:400});
+ for(const k of ['GHL_CLIENT_ID','GHL_CLIENT_SECRET','GHL_REDIRECT_URI','WORKER_URL','WORKER_API_KEY'])if(!process.env[k])return NextResponse.json({error:`Missing ${k}`},{status:500});
+ const body=new URLSearchParams({client_id:process.env.GHL_CLIENT_ID!,client_secret:process.env.GHL_CLIENT_SECRET!,grant_type:'authorization_code',code,user_type:'Location',redirect_uri:process.env.GHL_REDIRECT_URI!});
+ const tr=await fetch('https://services.leadconnectorhq.com/oauth/token',{method:'POST',headers:{accept:'application/json','content-type':'application/x-www-form-urlencoded'},body});const token=await tr.json();if(!tr.ok)return NextResponse.json({error:token?.message||'HighLevel token exchange failed',details:token},{status:502});
+ let locationId=token.locationId||token.location_id;const state=req.nextUrl.searchParams.get('state');if(!locationId&&state){try{locationId=JSON.parse(state).locationId}catch{}}if(!locationId) locationId=req.cookies.get('ghl_location_id')?.value;
+ if(!locationId){const ir=await fetch('https://services.leadconnectorhq.com/oauth/installed-locations?version=v3&pageSize=100',{headers:{Authorization:`Bearer ${token.access_token}`}});if(ir.ok){const d=await ir.json();const list=d.locations||d.data||[];if(list.length===1)locationId=list[0].locationId||list[0].id}}
+ if(!locationId)return NextResponse.json({error:'Authorized, but could not determine the GHL Location ID. Reinstall from the target sub-account or enter its Location ID before connecting.'},{status:422});
+ const wr=await fetch(`${process.env.WORKER_URL!.replace(/\/$/,'')}/integrations/ghl/connect`,{method:'POST',headers:{'content-type':'application/json','x-internal-api-key':process.env.WORKER_API_KEY!},body:JSON.stringify({locationId,accessToken:token.access_token,refreshToken:token.refresh_token,expiresIn:token.expires_in,scope:token.scope,userId:token.userId,companyId:token.companyId})});const wd=await wr.json().catch(()=>({}));if(!wr.ok)return NextResponse.json({error:wd.error||'Failed to save GHL connection'},{status:502});
+ const response=NextResponse.redirect(new URL(`/?ghl=connected&locationId=${encodeURIComponent(locationId)}`,req.url));response.cookies.delete('ghl_location_id');return response;
+}

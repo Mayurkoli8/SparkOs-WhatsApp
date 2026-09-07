@@ -1,0 +1,2 @@
+import { NextRequest,NextResponse } from 'next/server';import { workerFetch } from '@/lib/worker';
+export async function POST(req:NextRequest){const raw=await req.text();const r=await workerFetch('/webhooks/ghl/outbound',{method:'POST',body:raw,headers:{'x-ghl-signature':req.headers.get('x-ghl-signature')||''}});return new NextResponse(await r.text(),{status:r.status,headers:{'content-type':'application/json'}})}
