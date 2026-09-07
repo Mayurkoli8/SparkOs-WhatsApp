@@ -74,7 +74,20 @@ async function pushInbound(instance:any, from:string, text:string, messageId:str
     altId: messageId
   };
   const contact=await ghlFetch(access,`/contacts/upsert`,{method:'POST',body:{locationId:instance.locationId,phone:`+${normalizePhone(from)}`,source:'WhatsApp Bridge'}});
-  if(!contact.ok){log.error({status:contact.status},'GHL contact upsert failed');return;}
+  if (!contact.ok) {
+  const errorBody = await contact.text();
+
+  log.error(
+    {
+      status: contact.status,
+      body: errorBody,
+      locationId: instance.locationId,
+    },
+    'GHL contact upsert failed'
+  );
+
+  return;
+}
   const cd=await contact.json();
   payload.contactId=cd.contact?.id || cd.contactId;
   const r=await ghlFetch(access,`/conversations/messages/inbound`,{method:'POST',body:payload});
