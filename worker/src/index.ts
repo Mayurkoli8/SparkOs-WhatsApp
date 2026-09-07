@@ -164,17 +164,78 @@ app.post('/instances/:id/send',async(req,res)=>{try{const {to,text}=req.body||{}
 app.get('/integrations/ghl',(_req,res)=>res.json({connections:Object.values(registry.ghl).map(x=>({locationId:x.locationId,connected:true,updatedAt:x.updatedAt}))}));
 app.post('/integrations/ghl/connect',async(req,res)=>{try{const {locationId,accessToken,refreshToken,expiresIn,scope,userId,companyId}=req.body||{};if(!locationId||!accessToken)return res.status(400).json({error:'locationId and accessToken required'});if(!SECRET_KEY)throw new Error('TOKEN_ENCRYPTION_KEY is not configured');registry.ghl[locationId]={locationId,accessToken:enc(accessToken),refreshToken:refreshToken?enc(refreshToken):undefined,expiresAt:expiresIn?Date.now()+Number(expiresIn)*1000:undefined,scope,userId,companyId,updatedAt:new Date().toISOString()};await save();res.json({ok:true,locationId})}catch(e){res.status(500).json({error:e instanceof Error?e.message:'Failed'})}});
 
-app.post('/webhooks/ghl/outbound',async(req,res)=>{
-  try{
-    const raw = (req as express.Request & { rawBody?: string }).rawBody || JSON.stringify(req.body);
-    const locationId=body.locationId; const i=Object.values(registry.instances).find(x=>x.locationId===locationId); if(!i)return res.status(404).json({error:'No WhatsApp instance for this location'});
-    const to=body.phone || body.toNumber || body.to || body.contact?.phone; const text=body.message || body.text; if(!to||!text)return res.status(400).json({error:'Outbound payload missing phone or message'});
-    const sock=sockets.get(i.id); if(!sock)return res.status(409).json({error:'WhatsApp instance not connected'});
-    const result=await sock.sendMessage(jidFromPhone(to),{text});
-    const providerMessageId=result?.key?.id||crypto.randomUUID();
-    if(body.messageId) outboundMap.set(providerMessageId,{locationId,ghlMessageId:body.messageId});
-    res.json({success:true,providerMessageId,messageId:body.messageId||null});
-  }catch(e){log.error(e,'GHL outbound error');res.status(400).json({error:e instanceof Error?e.message:'Bad request'})}
+app.post('/webhooks/ghl/outbound', async (req, res) => {
+  try {
+    const raw =
+      (req as express.Request & { rawBody?: string }).rawBody ||
+      JSON.stringify(req.body);
+
+    const body = providerBody(
+      raw,
+      req.header('x-ghl-signature') || ''
+    );
+
+    const locationId = body.locationId;
+
+    const i = Object.values(registry.instances).find(
+      x => x.locationId === locationId
+    );
+
+    if (!i) {
+      return res.status(404).json({
+        error: 'No WhatsApp instance for this location'
+      });
+    }
+
+    const to =
+      body.phone ||
+      body.toNumber ||
+      body.to ||
+      body.contact?.phone;
+
+    const text = body.message || body.text;
+
+    if (!to || !text) {
+      return res.status(400).json({
+        error: 'Outbound payload missing phone or message'
+      });
+    }
+
+    const sock = sockets.get(i.id);
+
+    if (!sock) {
+      return res.status(409).json({
+        error: 'WhatsApp instance not connected'
+      });
+    }
+
+    const result = await sock.sendMessage(
+      jidFromPhone(to),
+      { text }
+    );
+
+    const providerMessageId =
+      result?.key?.id || crypto.randomUUID();
+
+    if (body.messageId) {
+      outboundMap.set(providerMessageId, {
+        locationId,
+        ghlMessageId: body.messageId
+      });
+    }
+
+    res.json({
+      success: true,
+      providerMessageId,
+      messageId: body.messageId || null
+    });
+  } catch (e) {
+    log.error(e, 'GHL outbound error');
+
+    res.status(400).json({
+      error: e instanceof Error ? e.message : 'Bad request'
+    });
+  }
 });
 
 // Express 5 JSON parser does not expose the raw body after parsing. Rebuild raw JSON for signature checking is not safe in general.
