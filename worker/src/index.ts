@@ -248,5 +248,7 @@ const origRaw = (app as any).use;
   for(const id of Object.keys(registry.instances)){
     startInstance(id).catch(e=>log.error({id,err:e},'Failed to resume instance'));
   }
-  app.listen(PORT,()=>log.info({port:PORT},'Worker listening'));
+  app.listen(PORT, '0.0.0.0', () =>
+  log.info({ port: PORT }, 'Worker listening')
+);
 })();
