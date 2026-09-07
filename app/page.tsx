@@ -27,7 +27,7 @@ export default function Home() {
     try {
       const [a, b] = await Promise.all([
         fetch('/api/instances', { cache: 'no-store' }),
-        fetch('/api/ghl/status', { cache: 'no-store' })
+        fetch('/api/oauth/status', { cache: 'no-store' })
       ]);
       if (!a.ok) throw new Error(await a.text());
       setInstances((await a.json()).instances ?? []);
@@ -68,7 +68,7 @@ export default function Home() {
   }
 
   function connectGhl() {
-    const url = '/api/ghl/install' + (locationId ? `?locationId=${encodeURIComponent(locationId)}` : '');
+    const url = '/api/oauth/install' + (locationId ? `?locationId=${encodeURIComponent(locationId)}` : '');
     window.location.href = url;
   }
 
