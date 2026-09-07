@@ -84,7 +84,7 @@ async function pushInbound(instance:any, from:string, text:string, messageId:str
       locationId: instance.locationId,
     },
     'GHL contact upsert failed'
-  );
+  );  
 
   return;
 }
