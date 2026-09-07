@@ -6,7 +6,7 @@
 2. Create a **Private** app for testing.
 3. Choose **Sub-account** as the target user.
 4. In Auth, create client ID/secret and add this redirect URL:
-   `https://YOUR_VERCEL_DOMAIN.vercel.app/api/ghl/callback`
+   `https://YOUR_VERCEL_DOMAIN.vercel.app/api/oauth/callback`
 5. Add these scopes:
    - `conversations/message.write`
    - `conversations.readonly`
@@ -15,7 +15,7 @@
    - `contacts.write`
    - `conversations/message.readonly`
 6. Configure a custom conversation provider. For this bridge, use the supported custom **SMS** provider path, enable the conversation tab, and set its Delivery URL to:
-   `https://YOUR_VERCEL_DOMAIN.vercel.app/api/ghl/outbound`
+   `https://YOUR_VERCEL_DOMAIN.vercel.app/api/oauth/outbound`
 7. Copy the provider ID shown by HighLevel and use it as `GHL_CONVERSATION_PROVIDER_ID`.
 8. From **Manage → Versions**, create a test link for your app version and install it into your sandbox/test Location ID.
 
@@ -36,7 +36,7 @@ GHL_CONVERSATION_PROVIDER_ID=<provider-id>
 GHL_INBOUND_TYPE=SMS
 GHL_CLIENT_ID=<client-id>
 GHL_CLIENT_SECRET=<client-secret>
-GHL_REDIRECT_URI=https://YOUR_VERCEL_DOMAIN.vercel.app/api/ghl/callback
+GHL_REDIRECT_URI=https://YOUR_VERCEL_DOMAIN.vercel.app/api/oauth/callback
 GHL_WEBHOOK_PUBLIC_KEY=-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAi2HR1srL4o18O8BRa7gVJY7G7bupbN3H9AwJrHCDiOg=\n-----END PUBLIC KEY-----
 TOKEN_ENCRYPTION_KEY=<base64-encoded-32-byte-key>
 DISABLE_GHL_SIGNATURE=false
@@ -62,7 +62,7 @@ WORKER_API_KEY=<same-as-worker>
 NEXT_PUBLIC_APP_NAME=Spark WhatsApp Bridge
 GHL_CLIENT_ID=<client-id>
 GHL_CLIENT_SECRET=<client-secret>
-GHL_REDIRECT_URI=https://YOUR_VERCEL_DOMAIN.vercel.app/api/ghl/callback
+GHL_REDIRECT_URI=https://YOUR_VERCEL_DOMAIN.vercel.app/api/oauth/callback
 GHL_INSTALL_URL=<HighLevel-generated test/install URL>
 GHL_CONVERSATION_PROVIDER_ID=<provider-id>
 ```
@@ -78,4 +78,4 @@ GHL_CONVERSATION_PROVIDER_ID=<provider-id>
 7. Scan the QR.
 8. Send a test WhatsApp message to that number.
 9. The worker should upsert the contact and add an inbound message to HighLevel.
-10. Reply from the configured HighLevel custom provider channel. The provider Delivery URL should hit `/api/ghl/outbound`, which forwards to the worker and then WhatsApp.
+10. Reply from the configured HighLevel custom provider channel. The provider Delivery URL should hit `/api/oauth/outbound`, which forwards to the worker and then WhatsApp.

@@ -75,7 +75,7 @@ const GHL_CLIENT_ID = process.env.GHL_CLIENT_ID || '';
 const GHL_CLIENT_SECRET = process.env.GHL_CLIENT_SECRET || '';
 const GHL_REDIRECT_URI = process.env.GHL_REDIRECT_URI || '';
 const GHL_SIG_BYPASS = process.env.DISABLE_GHL_SIGNATURE === 'true';
-const GHL_PUB = process.env.GHL_WEBHOOK_PUBLIC_KEY || `-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAi2HR1srL4o18O8BRa7gVJY7G7bupbN3H9AwJrHCDiOg=\n-----END PUBLIC KEY-----`;
+const GHL_PUB = (process.env.GHL_WEBHOOK_PUBLIC_KEY || `-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAi2HR1srL4o18O8BRa7gVJY7G7bupbN3H9AwJrHCDiOg=\n-----END PUBLIC KEY-----`).replace(/\\n/g, '\n');
 const sockets = new Map();
 const qrCache = new Map();
 const outboundMap = new Map();

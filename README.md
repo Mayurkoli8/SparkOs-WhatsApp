@@ -41,7 +41,7 @@ GHL_CONVERSATION_PROVIDER_ID=YOUR_PROVIDER_ID
 GHL_INBOUND_TYPE=SMS
 GHL_CLIENT_ID=YOUR_GHL_CLIENT_ID
 GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
-GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/ghl/callback
+GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
 DISABLE_GHL_SIGNATURE=false
 GHL_WEBHOOK_PUBLIC_KEY=-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----
 ```
@@ -65,13 +65,13 @@ WORKER_API_KEY=change-me
 NEXT_PUBLIC_APP_NAME=Spark WhatsApp Bridge
 GHL_CLIENT_ID=YOUR_GHL_CLIENT_ID
 GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
-GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/ghl/callback
+GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
 GHL_INSTALL_URL=https://marketplace.gohighlevel.com/YOUR_INSTALL_URL
 GHL_CONVERSATION_PROVIDER_ID=YOUR_PROVIDER_ID
 GHL_INBOUND_TYPE=SMS
 GHL_CLIENT_ID=YOUR_GHL_CLIENT_ID
 GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
-GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/ghl/callback
+GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
 DISABLE_GHL_SIGNATURE=false
 ```
 
@@ -91,11 +91,11 @@ In HighLevel Developer Marketplace:
    - `contacts.write`
    - `conversations/message.readonly`
 4. Set the OAuth redirect URL to:
-   `https://YOUR_VERCEL_DOMAIN/api/ghl/callback`
+   `https://YOUR_VERCEL_DOMAIN/api/oauth/callback`
 5. Create the client ID and client secret.
 6. Configure the custom conversation provider in the Marketplace app.
 7. Configure the provider as a custom **SMS** provider (the supported custom-channel path), enable the conversation tab, and set the provider delivery URL to:
-   `https://YOUR_VERCEL_DOMAIN/api/ghl/outbound`
+   `https://YOUR_VERCEL_DOMAIN/api/oauth/outbound`
 8. Copy the resulting `conversationProviderId` into the Vercel and worker environment variables.
 9. Generate the app installation/test link from the app version and install it into your test Location ID.
 
