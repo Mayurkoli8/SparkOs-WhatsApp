@@ -23,10 +23,11 @@
 
 Deploy `worker/` to a service that keeps a Node process alive and provides persistent storage. Railway, Render, Fly.io, or a VPS are suitable.
 
+For Railway, create the service from this repository and set **Root Directory** to `/worker`. The worker directory includes a `railway.json` with its build, start, and `/health` settings. Do not deploy the repository root as the worker, because the root package is the Next.js web app.
+
 Environment:
 
 ```env
-PORT=3001
 INTERNAL_API_KEY=<long-random-secret>
 DATA_DIR=/app/data
 GHL_API_BASE=https://services.leadconnectorhq.com

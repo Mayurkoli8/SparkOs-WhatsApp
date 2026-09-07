@@ -27,12 +27,11 @@ This keeps the public site on Vercel while the WhatsApp sessions remain alive.
 
 ## 1. Deploy the worker first
 
-Recommended: Railway/Render/Fly.io with a persistent disk.
+Recommended: Railway/Render/Fly.io with a persistent disk. For Railway, set the service **Root Directory** to `/worker`; the repository root is the separate Next.js web app. The worker includes `worker/railway.json` for its build, start, and `/health` health check settings.
 
 Set these worker variables:
 
 ```env
-PORT=3001
 PUBLIC_BASE_URL=https://your-worker.example.com
 INTERNAL_API_KEY=change-me
 DATA_DIR=/app/data
