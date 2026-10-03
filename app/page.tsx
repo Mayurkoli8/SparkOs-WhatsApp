@@ -287,7 +287,7 @@ export default function Home() {
           <p className="muted">Use these values in the Marketplace app (Advanced Settings → Auth, and Conversation Providers).</p>
           {diag && (
             <>
-              <CopyRow label="OAuth redirect URL" value={diag.urls.redirectUri || diag.urls.callbackUrl} />
+              <CopyRow label="OAuth redirect URL" value={diag.urls.callbackUrl} />
               <CopyRow label="Provider Delivery URL" value={diag.urls.deliveryUrl} />
               <CopyRow label="Provider ID on the worker" value={diag.worker?.providerId || 'not set'} />
             </>

@@ -1,4 +1,4 @@
-import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, GHL_REDIRECT_URI, INBOUND_TYPE, PROVIDER_ID } from './config';
+import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, PROVIDER_ID } from './config';
 import { decrypt, encrypt, registry, save, type GhlConnection } from './store';
 
 // HighLevel rejects or misroutes calls without the per-API version from its OpenAPI spec.
@@ -72,9 +72,9 @@ async function refreshAccessToken(conn: GhlConnection): Promise<string> {
     client_secret: GHL_CLIENT_SECRET,
     grant_type: 'refresh_token',
     refresh_token: decrypt(conn.refreshToken!),
+    // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
     user_type: conn.userType === 'Company' ? 'Company' : 'Location'
   });
-  if (GHL_REDIRECT_URI) form.set('redirect_uri', GHL_REDIRECT_URI);
   const res = await fetch(`${GHL_BASE}/oauth/token`, {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -250,6 +250,53 @@ export async function uploadAttachment(
 export async function getMessage(locationId: string, messageId: string) {
   const data = await ghlRequest(locationId, `/conversations/messages/${encodeURIComponent(messageId)}`, { version: CONVERSATIONS_VERSION });
   return data.message || data;
+}
+
+// Scopes the Conversation Provider docs require for this bridge.
+export const REQUIRED_SCOPES = [
+  'conversations.readonly',
+  'conversations.write',
+  'conversations/message.readonly',
+  'conversations/message.write',
+  'contacts.readonly',
+  'contacts.write'
+];
+
+export function missingScopes(scope: string | null | undefined) {
+  const granted = new Set((scope || '').split(/\s+/).filter(Boolean));
+  return REQUIRED_SCOPES.filter(s => !granted.has(s));
+}
+
+// HighLevel access tokens are JWTs; their claims say whether this is an agency (Company) or sub-account (Location)
+// token. Only these two claims are surfaced, never the token.
+export function tokenClaims(locationId: string): { authClass?: string; authClassId?: string } | null {
+  const conn = registry.ghl[locationId];
+  if (!conn) return null;
+  try {
+    const payload = decrypt(conn.accessToken).split('.')[1];
+    if (!payload) return null;
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return { authClass: claims.authClass, authClassId: claims.authClassId };
+  } catch {
+    return null;
+  }
+}
+
+export function connectionProblem(locationId: string): string | null {
+  const conn = registry.ghl[locationId];
+  if (!conn) return null;
+  const claims = tokenClaims(locationId);
+  if (claims?.authClass === 'Company') {
+    return `the stored token is an agency (Company) token, but conversations need a sub-account token. Set the Marketplace app's target user to Sub-account, then click "Connect GHL" and install it into location ${locationId}.`;
+  }
+  if (claims?.authClass === 'Location' && claims.authClassId && claims.authClassId !== locationId) {
+    return `the stored token belongs to location ${claims.authClassId}, not ${locationId}. Click "Connect GHL" and install into ${locationId}.`;
+  }
+  const missing = missingScopes(conn.scope);
+  if (missing.length) {
+    return `the token is missing scopes ${missing.join(', ')}. Add them in the Marketplace app (Advanced Settings → Auth → Scopes), then click "Connect GHL" again.`;
+  }
+  return conn.lastError || null;
 }
 
 // A cheap authenticated call that exercises the token, the conversations scope and the Version header.

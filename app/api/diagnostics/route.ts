@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
 
-const REQUIRED_ENV = ['WORKER_URL', 'WORKER_API_KEY', 'GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'GHL_REDIRECT_URI', 'GHL_INSTALL_URL'];
+const REQUIRED_ENV = ['WORKER_URL', 'WORKER_API_KEY', 'GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'GHL_INSTALL_URL'];
 
 export async function GET(req: NextRequest) {
   const origin = new URL(req.url).origin;
@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
     checks.push({
       id: 'redirect',
       level: 'warn',
-      message: `GHL_REDIRECT_URI is ${redirectUri} but this site's callback is ${callbackUrl}. The redirect URL in the HighLevel app, GHL_REDIRECT_URI, and the site you install from must all match.`
+      message: `GHL_REDIRECT_URI is ${redirectUri}, which is not this site's callback (${callbackUrl}). The callback no longer uses it, but the HighLevel app's redirect URL must be ${callbackUrl}; update or remove the variable to avoid confusion.`
     });
   }
 

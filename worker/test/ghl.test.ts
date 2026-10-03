@@ -202,6 +202,36 @@ test('locations without an OAuth connection are reported clearly', async () => {
   await assert.rejects(ghl.getAccessToken('MISSING'), ghl.GhlNotConnectedError);
 });
 
+test('missingScopes lists the provider scopes a token lacks', () => {
+  const granted = 'conversations.readonly conversations.write conversations/message.readonly conversations/message.write conversations/reports.readonly';
+  assert.deepEqual(ghl.missingScopes(granted), ['contacts.readonly', 'contacts.write']);
+  assert.deepEqual(ghl.missingScopes(`${granted} contacts.readonly contacts.write`), []);
+  assert.deepEqual(ghl.missingScopes(undefined), ghl.REQUIRED_SCOPES);
+});
+
+test('tokenClaims reads the class of the stored token without exposing it', () => {
+  const jwt = (claims: object) => `e30.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.sig`;
+  registry.ghl.LOC1.accessToken = encrypt(jwt({ authClass: 'Company', authClassId: 'COMPANY9', oauthMeta: { scopes: ['contacts.write'] } }));
+  assert.deepEqual(ghl.tokenClaims('LOC1'), { authClass: 'Company', authClassId: 'COMPANY9' });
+  registry.ghl.LOC1.accessToken = encrypt('opaque-token');
+  assert.equal(ghl.tokenClaims('LOC1'), null);
+  assert.equal(ghl.tokenClaims('MISSING'), null);
+});
+
+test('connectionProblem explains agency tokens, wrong locations and missing scopes', () => {
+  const jwt = (claims: object) => `e30.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.sig`;
+  const all = ghl.REQUIRED_SCOPES.join(' ');
+  registry.ghl.LOC1.scope = all;
+  registry.ghl.LOC1.accessToken = encrypt(jwt({ authClass: 'Company', authClassId: 'COMPANY9' }));
+  assert.match(ghl.connectionProblem('LOC1') || '', /agency/i);
+  registry.ghl.LOC1.accessToken = encrypt(jwt({ authClass: 'Location', authClassId: 'OTHER' }));
+  assert.match(ghl.connectionProblem('LOC1') || '', /OTHER/);
+  registry.ghl.LOC1.accessToken = encrypt(jwt({ authClass: 'Location', authClassId: 'LOC1' }));
+  assert.equal(ghl.connectionProblem('LOC1'), null);
+  registry.ghl.LOC1.scope = 'conversations.readonly';
+  assert.match(ghl.connectionProblem('LOC1') || '', /contacts\.write/);
+});
+
 test('deriveKey keeps real base64 32-byte keys and hashes anything else', () => {
   const real = crypto.randomBytes(32);
   assert.deepEqual(deriveKey(real.toString('base64')), { key: real, source: 'env' });

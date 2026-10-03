@@ -21,13 +21,14 @@ export async function GET(req: NextRequest) {
   const missing = ['GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'WORKER_URL', 'WORKER_API_KEY'].filter(k => !process.env[k]);
   if (missing.length) return backToDashboard(req, { ghl: 'error', message: `Missing Vercel environment variables: ${missing.join(', ')}` });
 
+  // The redirect URI HighLevel just used is, by definition, this request's own URL without the query string.
   const body = new URLSearchParams({
     client_id: process.env.GHL_CLIENT_ID!,
     client_secret: process.env.GHL_CLIENT_SECRET!,
     grant_type: 'authorization_code',
     code,
     user_type: 'Location',
-    redirect_uri: process.env.GHL_REDIRECT_URI || new URL('/api/oauth/callback', req.url).toString()
+    redirect_uri: `${req.nextUrl.origin}${req.nextUrl.pathname}`
   });
 
   let token: Record<string, any>;

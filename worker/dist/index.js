@@ -153,14 +153,18 @@ app.post('/instances/:id/send', async (req, res) => {
 });
 function connectionSummary(locationId) {
     const conn = store_1.registry.ghl[locationId];
+    const claims = ghl.tokenClaims(locationId);
     return {
         locationId,
         connected: true,
         userType: conn.userType || null,
+        tokenClass: claims?.authClass || null,
+        tokenClassId: claims?.authClassId || null,
         scope: conn.scope || null,
+        missingScopes: ghl.missingScopes(conn.scope),
         expiresAt: conn.expiresAt ? new Date(conn.expiresAt).toISOString() : null,
         canRefresh: Boolean(conn.refreshToken),
-        lastError: conn.lastError || null,
+        lastError: ghl.connectionProblem(locationId),
         updatedAt: conn.updatedAt
     };
 }
@@ -186,10 +190,11 @@ app.post('/integrations/ghl/connect', async (req, res) => {
             return res.status(400).json({ error: 'locationId and accessToken required' });
         await ghl.saveConnection({ locationId, accessToken, refreshToken, expiresIn, scope, userId, companyId, userType });
         const check = await checkConnection(locationId);
-        if (check.ok)
+        const problem = ghl.connectionProblem(locationId);
+        if (check.ok && !problem)
             (0, events_1.recordEvent)('info', `HighLevel connected for location ${locationId}`, { locationId });
         else
-            (0, events_1.recordEvent)('error', `HighLevel token saved for ${locationId}, but a test API call failed`, { locationId, detail: `${check.error} ${check.body || ''}` });
+            (0, events_1.recordEvent)('error', `HighLevel token saved for ${locationId}, but ${problem || 'a test API call failed'}`, { locationId, detail: check.ok ? undefined : `${check.error} ${check.body || ''}` });
         res.json({ ok: true, locationId, check });
     }
     catch (err) {
@@ -228,7 +233,7 @@ app.get('/diagnostics', (_req, res) => {
     const persistent = relative === null ? null : !relative.startsWith('..') && !node_path_1.default.isAbsolute(relative);
     const keySource = (0, store_1.getTokenKeySource)();
     const unlinkedLocations = [...new Set(instances.map(i => i.locationId))].filter(l => !store_1.registry.ghl[l]);
-    const brokenLocations = locations.filter(l => store_1.registry.ghl[l].lastError);
+    const brokenLocations = locations.map(l => [l, ghl.connectionProblem(l)]).filter(([, problem]) => problem);
     const checks = [
         persistent === true
             ? { id: 'storage', level: 'ok', message: `Data is stored on the attached volume (${config_1.DATA_DIR}).` }
@@ -252,7 +257,7 @@ app.get('/diagnostics', (_req, res) => {
         !locations.length
             ? { id: 'ghl', level: 'error', message: 'No HighLevel location is connected. Click "Connect GHL" and install the app into the sub-account.' }
             : brokenLocations.length
-                ? { id: 'ghl', level: 'error', message: `HighLevel token problem for ${brokenLocations.map(l => `${l} (${store_1.registry.ghl[l].lastError})`).join('; ')}. Click "Connect GHL" again.` }
+                ? { id: 'ghl', level: 'error', message: brokenLocations.map(([l, problem]) => `HighLevel connection for ${l}: ${problem}`).join(' ') }
                 : { id: 'ghl', level: 'ok', message: `HighLevel connected for ${locations.join(', ')}` },
         unlinkedLocations.length
             ? { id: 'location-match', level: 'error', message: `These instances' locations have no HighLevel connection: ${unlinkedLocations.join(', ')}` }
