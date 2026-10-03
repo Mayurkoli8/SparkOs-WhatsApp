@@ -1,20 +1,27 @@
 {
-  "name":"ghl-whatsapp-bridge-worker",
-  "private":true,
-  "version":"0.1.0",
-  "engines":{"node":">=20.0.0"},
-  "scripts":{"dev":"tsx src/index.ts","build":"tsc -p tsconfig.json","start":"node dist/index.js"},
-  "dependencies":{
-    "@whiskeysockets/baileys":"7.0.0-rc14",
-    "express":"5.1.0",
-    "pino":"9.7.0",
-    "qrcode":"1.5.4"
+  "name": "ghl-whatsapp-bridge-worker",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20.0.0"
   },
-  "devDependencies":{
-    "@types/express":"5.0.3",
-    "@types/node":"22.15.21",
-    "@types/qrcode":"1.5.5",
-    "tsx":"4.19.4",
-    "typescript":"5.8.3"
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "tsc -p tsconfig.test.json && node --require ./.test-build/test/setup.js --test .test-build/test/*.test.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "7.0.0-rc14",
+    "express": "5.1.0",
+    "pino": "9.7.0",
+    "qrcode": "1.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.3",
+    "@types/node": "22.15.21",
+    "@types/qrcode": "1.5.5",
+    "tsx": "4.19.4",
+    "typescript": "5.8.3"
   }
 }
