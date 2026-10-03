@@ -30,8 +30,6 @@ Environment:
 ```env
 INTERNAL_API_KEY=<long-random-secret>
 DATA_DIR=/app/data
-GHL_API_BASE=https://services.leadconnectorhq.com
-GHL_VERSION=v3
 GHL_CONVERSATION_PROVIDER_ID=<provider-id>
 GHL_INBOUND_TYPE=SMS
 GHL_CLIENT_ID=<client-id>

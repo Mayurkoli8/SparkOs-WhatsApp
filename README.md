@@ -32,19 +32,18 @@ Recommended: Railway/Render/Fly.io with a persistent disk. For Railway, set the 
 Set these worker variables:
 
 ```env
-PUBLIC_BASE_URL=https://your-worker.example.com
 INTERNAL_API_KEY=change-me
 DATA_DIR=/app/data
-GHL_API_BASE=https://services.leadconnectorhq.com
-GHL_VERSION=v3
 GHL_CONVERSATION_PROVIDER_ID=YOUR_PROVIDER_ID
-GHL_INBOUND_TYPE=SMS
 GHL_CLIENT_ID=YOUR_GHL_CLIENT_ID
 GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
 GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
-DISABLE_GHL_SIGNATURE=false
-GHL_WEBHOOK_PUBLIC_KEY=-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----
+TOKEN_ENCRYPTION_KEY=<openssl rand -base64 32>
 ```
+
+Optional: `GHL_INBOUND_TYPE` (default `SMS`), `SYNC_PHONE_MESSAGES` (default `true`, mirrors messages typed on the phone into GHL), `SEND_MIN_INTERVAL_MS` (default `1200`, spacing between WhatsApp sends), `MAX_MEDIA_MB` (default `16`), `GHL_WEBHOOK_PUBLIC_KEY` (defaults to HighLevel's published Ed25519 key). Do not set `GHL_VERSION`; the worker sends the API version each HighLevel endpoint requires. Never set `DISABLE_GHL_SIGNATURE=true` in production.
+
+Attach a Railway volume and mount it at `/app/data` (or wherever `DATA_DIR` points). Without it, every redeploy logs WhatsApp out and forgets the HighLevel token.
 
 Then:
 
@@ -68,11 +67,6 @@ GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
 GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
 GHL_INSTALL_URL=https://marketplace.gohighlevel.com/YOUR_INSTALL_URL
 GHL_CONVERSATION_PROVIDER_ID=YOUR_PROVIDER_ID
-GHL_INBOUND_TYPE=SMS
-GHL_CLIENT_ID=YOUR_GHL_CLIENT_ID
-GHL_CLIENT_SECRET=YOUR_GHL_CLIENT_SECRET
-GHL_REDIRECT_URI=https://your-vercel-domain.vercel.app/api/oauth/callback
-DISABLE_GHL_SIGNATURE=false
 ```
 
 Then connect your custom domain if needed.
@@ -108,7 +102,11 @@ In HighLevel Developer Marketplace:
 5. Click **Show QR**.
 6. Scan the QR from WhatsApp > Linked devices.
 7. When the instance becomes Connected, inbound messages should be forwarded to HighLevel.
-8. Outbound messages from the configured custom provider in HighLevel are forwarded to the worker and then to WhatsApp.
+8. Outbound messages from the configured custom provider in HighLevel are forwarded to the worker and then to WhatsApp. Delivered/read receipts update the message status in HighLevel; failures are marked failed with the reason.
+
+## Troubleshooting
+
+The dashboard's **Setup status** panel checks the configuration on both Vercel and the worker (API key, provider ID, OAuth client, persistent storage, signature verification, HighLevel connection, WhatsApp connection). The **Activity** panel lists every sync attempt and the exact HighLevel error when one fails. `GET /api/health` shows which worker build is running.
 
 ## Notes
 
