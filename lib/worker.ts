@@ -8,7 +8,8 @@ export async function workerFetch(path: string, init?: RequestInit) {
   const key = process.env.WORKER_API_KEY;
   if (!key) throw new Error('WORKER_URL and WORKER_API_KEY are required');
   return fetch(`${workerUrl()}${path}`, {
+    signal: AbortSignal.timeout(25_000),
     ...init,
-    headers: { ...(init?.headers || {}), 'content-type': 'application/json', 'x-internal-api-key': key }
+    headers: { ...(init?.headers as Record<string, string> | undefined), 'content-type': 'application/json', 'x-internal-api-key': key }
   });
 }

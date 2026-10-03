@@ -1,13 +1,85 @@
-import { NextRequest,NextResponse } from 'next/server';
-import { workerUrl } from '@/lib/worker';
-export async function GET(req:NextRequest){
- const code=req.nextUrl.searchParams.get('code');if(!code)return NextResponse.json({error:'Missing OAuth code'},{status:400});
- for(const k of ['GHL_CLIENT_ID','GHL_CLIENT_SECRET','GHL_REDIRECT_URI','WORKER_URL','WORKER_API_KEY'])if(!process.env[k])return NextResponse.json({error:`Missing ${k}`},{status:500});
- const body=new URLSearchParams({client_id:process.env.GHL_CLIENT_ID!,client_secret:process.env.GHL_CLIENT_SECRET!,grant_type:'authorization_code',code,user_type:'Location',redirect_uri:process.env.GHL_REDIRECT_URI!});
- const tr=await fetch('https://services.leadconnectorhq.com/oauth/token',{method:'POST',headers:{accept:'application/json','content-type':'application/x-www-form-urlencoded'},body});const token=await tr.json();if(!tr.ok)return NextResponse.json({error:token?.message||'HighLevel token exchange failed',details:token},{status:502});
- let locationId=token.locationId||token.location_id;const state=req.nextUrl.searchParams.get('state');if(!locationId&&state){try{locationId=JSON.parse(state).locationId}catch{}}if(!locationId) locationId=req.cookies.get('ghl_location_id')?.value;
- if(!locationId){const ir=await fetch('https://services.leadconnectorhq.com/oauth/installed-locations?version=v3&pageSize=100',{headers:{Authorization:`Bearer ${token.access_token}`}});if(ir.ok){const d=await ir.json();const list=d.locations||d.data||[];if(list.length===1)locationId=list[0].locationId||list[0].id}}
- if(!locationId)return NextResponse.json({error:'Authorized, but could not determine the GHL Location ID. Reinstall from the target sub-account or enter its Location ID before connecting.'},{status:422});
- const wr=await fetch(`${workerUrl()}/integrations/ghl/connect`,{method:'POST',headers:{'content-type':'application/json','x-internal-api-key':process.env.WORKER_API_KEY!},body:JSON.stringify({locationId,accessToken:token.access_token,refreshToken:token.refresh_token,expiresIn:token.expires_in,scope:token.scope,userId:token.userId,companyId:token.companyId})});const wd=await wr.json().catch(()=>({}));if(!wr.ok)return NextResponse.json({error:wd.error||'Failed to save GHL connection'},{status:502});
- const response=NextResponse.redirect(new URL(`/?ghl=connected&locationId=${encodeURIComponent(locationId)}`,req.url));response.cookies.delete('ghl_location_id');return response;
+import { NextRequest, NextResponse } from 'next/server';
+import { workerFetch } from '@/lib/worker';
+
+const GHL_TOKEN_URL = 'https://services.leadconnectorhq.com/oauth/token';
+
+// Every outcome lands back on the dashboard with a readable banner instead of a raw JSON error page.
+function backToDashboard(req: NextRequest, params: Record<string, string>) {
+  const url = new URL('/', req.url);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = NextResponse.redirect(url);
+  response.cookies.delete('ghl_location_id');
+  return response;
+}
+
+export async function GET(req: NextRequest) {
+  const params = req.nextUrl.searchParams;
+  const code = params.get('code');
+  if (!code) {
+    return backToDashboard(req, { ghl: 'error', message: params.get('error_description') || params.get('error') || 'HighLevel did not send an authorization code.' });
+  }
+  const missing = ['GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'WORKER_URL', 'WORKER_API_KEY'].filter(k => !process.env[k]);
+  if (missing.length) return backToDashboard(req, { ghl: 'error', message: `Missing Vercel environment variables: ${missing.join(', ')}` });
+
+  const body = new URLSearchParams({
+    client_id: process.env.GHL_CLIENT_ID!,
+    client_secret: process.env.GHL_CLIENT_SECRET!,
+    grant_type: 'authorization_code',
+    code,
+    user_type: 'Location',
+    redirect_uri: process.env.GHL_REDIRECT_URI || new URL('/api/oauth/callback', req.url).toString()
+  });
+
+  let token: Record<string, any>;
+  try {
+    const res = await fetch(GHL_TOKEN_URL, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+      body
+    });
+    token = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const reason = token.error_description || token.message || token.error || 'unknown error';
+      return backToDashboard(req, { ghl: 'error', message: `HighLevel token exchange failed (${res.status}): ${reason}` });
+    }
+  } catch (err) {
+    return backToDashboard(req, { ghl: 'error', message: `Could not reach HighLevel: ${err instanceof Error ? err.message : String(err)}` });
+  }
+
+  const locationId: string | undefined = token.locationId;
+  if (!locationId) {
+    return backToDashboard(req, {
+      ghl: 'error',
+      message:
+        token.userType === 'Company'
+          ? 'The app was installed at the agency level. Install it into a specific sub-account by choosing that location on the HighLevel install screen.'
+          : 'HighLevel did not return a location id for this install.'
+    });
+  }
+
+  try {
+    const res = await workerFetch('/integrations/ghl/connect', {
+      method: 'POST',
+      body: JSON.stringify({
+        locationId,
+        accessToken: token.access_token,
+        refreshToken: token.refresh_token,
+        expiresIn: token.expires_in,
+        scope: token.scope,
+        userId: token.userId,
+        companyId: token.companyId,
+        userType: token.userType
+      })
+    });
+    const saved = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return backToDashboard(req, { ghl: 'error', locationId, message: `HighLevel authorized the app, but the worker could not store the token: ${saved.error || `HTTP ${res.status}`}` });
+    }
+    if (saved.check && !saved.check.ok) {
+      return backToDashboard(req, { ghl: 'warning', locationId, message: `Connected, but a test call to HighLevel failed: ${saved.check.error}` });
+    }
+    return backToDashboard(req, { ghl: 'connected', locationId });
+  } catch (err) {
+    return backToDashboard(req, { ghl: 'error', locationId, message: `The WhatsApp worker is unreachable: ${err instanceof Error ? err.message : String(err)}` });
+  }
 }
