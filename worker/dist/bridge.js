@@ -52,6 +52,7 @@ const baileys_1 = __importStar(require("@whiskeysockets/baileys"));
 const config_1 = require("./config");
 const events_1 = require("./events");
 const ghl = __importStar(require("./ghl"));
+const safe_fetch_1 = require("./safe-fetch");
 const store_1 = require("./store");
 const wa_message_1 = require("./wa-message");
 const baileysLogger = events_1.log.child({ module: 'baileys' }, { level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
@@ -515,24 +516,20 @@ async function whatsappJid(sock, digits) {
         return `${digits}@s.whatsapp.net`;
     }
 }
+// Attachments are downloaded here (public HTTPS hosts only, size-capped) and handed to Baileys as bytes,
+// so a crafted URL in a delivery webhook cannot make the worker fetch internal addresses.
 async function attachmentContent(url) {
-    let contentType = null;
-    if ((0, wa_message_1.attachmentKind)(url) === 'document') {
-        contentType = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8000) })
-            .then(r => r.headers.get('content-type'))
-            .catch(() => null);
-    }
-    const kind = (0, wa_message_1.attachmentKind)(url, contentType);
-    const mimetype = contentType?.split(';')[0].trim();
-    switch (kind) {
+    const { data, contentType } = await (0, safe_fetch_1.downloadPublicFile)(url, config_1.MAX_MEDIA_BYTES);
+    const mimetype = contentType?.split(';')[0].trim() || undefined;
+    switch ((0, wa_message_1.attachmentKind)(url, mimetype)) {
         case 'image':
-            return { image: { url } };
+            return { image: data };
         case 'video':
-            return { video: { url } };
+            return { video: data };
         case 'audio':
-            return { audio: { url }, mimetype: mimetype || (url.toLowerCase().includes('.ogg') ? 'audio/ogg; codecs=opus' : 'audio/mpeg') };
+            return { audio: data, mimetype: mimetype || 'audio/mpeg' };
         default:
-            return { document: { url }, mimetype: mimetype || 'application/octet-stream', fileName: (0, wa_message_1.fileNameFromUrl)(url) };
+            return { document: data, mimetype: mimetype || 'application/octet-stream', fileName: (0, wa_message_1.fileNameFromUrl)(url) };
     }
 }
 async function sendTracked(sock, jid, content, delivery) {

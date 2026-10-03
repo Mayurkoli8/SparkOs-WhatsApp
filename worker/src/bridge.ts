@@ -18,6 +18,7 @@ import makeWASocket, {
 import { DATA_DIR, MAX_MEDIA_BYTES, SEND_INTERVAL_MS, SYNC_PHONE_MESSAGES } from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
 import * as ghl from './ghl';
+import { downloadPublicFile } from './safe-fetch';
 import { registry, save, type InstanceRecord } from './store';
 import {
   attachmentKind,
@@ -506,24 +507,20 @@ async function whatsappJid(sock: WASocket, digits: string): Promise<string | nul
   }
 }
 
+// Attachments are downloaded here (public HTTPS hosts only, size-capped) and handed to Baileys as bytes,
+// so a crafted URL in a delivery webhook cannot make the worker fetch internal addresses.
 async function attachmentContent(url: string): Promise<AnyMessageContent> {
-  let contentType: string | null = null;
-  if (attachmentKind(url) === 'document') {
-    contentType = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(8000) })
-      .then(r => r.headers.get('content-type'))
-      .catch(() => null);
-  }
-  const kind = attachmentKind(url, contentType);
-  const mimetype = contentType?.split(';')[0].trim();
-  switch (kind) {
+  const { data, contentType } = await downloadPublicFile(url, MAX_MEDIA_BYTES);
+  const mimetype = contentType?.split(';')[0].trim() || undefined;
+  switch (attachmentKind(url, mimetype)) {
     case 'image':
-      return { image: { url } };
+      return { image: data };
     case 'video':
-      return { video: { url } };
+      return { video: data };
     case 'audio':
-      return { audio: { url }, mimetype: mimetype || (url.toLowerCase().includes('.ogg') ? 'audio/ogg; codecs=opus' : 'audio/mpeg') };
+      return { audio: data, mimetype: mimetype || 'audio/mpeg' };
     default:
-      return { document: { url }, mimetype: mimetype || 'application/octet-stream', fileName: fileNameFromUrl(url) };
+      return { document: data, mimetype: mimetype || 'application/octet-stream', fileName: fileNameFromUrl(url) };
   }
 }
 
