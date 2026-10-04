@@ -12,7 +12,7 @@ async function report(level: 'info' | 'warn' | 'error', message: string, detail?
 }
 
 function backToDashboard(req: NextRequest, params: Record<string, string>) {
-  const url = new URL('/', req.url);
+  const url = new URL('/admin', req.url);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = NextResponse.redirect(url);
   response.cookies.delete('ghl_location_id');
