@@ -101,6 +101,32 @@ test('minting failures are recorded and explained', async () => {
   assert.match(problem, /not authorized for this scope/);
 });
 
+test('a location access error is explained with the installed-locations check', async () => {
+  const agencyJwt = jwt({ authClass: 'Company', authClassId: 'CO1', oauthMeta: { client: 'APP123-abc', versionId: 'VER-NEW', scopes: ['contacts.write'] } });
+  await ghl.saveAgencyConnection({ companyId: 'CO1', accessToken: agencyJwt, refreshToken: 'agency-refresh', expiresIn: 86399, scope: AGENCY_SCOPES, locationIds: ['LOC1', 'LOC2'] });
+  on('POST', '/oauth/locationToken', () => ({
+    status: 400,
+    json: { message: 'Invalid locationId or accessToken does not have access to following location', error: 'Bad Request', statusCode: 400 }
+  }));
+  on('GET', '/oauth/installedLocations', call =>
+    call.url.searchParams.get('locationId') === 'LOC1'
+      ? { json: { locations: [{ _id: 'LOC1', name: 'Shop', address: '', isInstalled: false }], count: 1 } }
+      : { json: { locations: [{ _id: 'LOC2', name: 'Shop 2', address: '', isInstalled: true, versionId: 'VER-OLD' }], count: 1 } }
+  );
+
+  await assert.rejects(ghl.getAccessToken('LOC1'), ghl.GhlApiError);
+  const [lookup] = callsTo('GET', '/oauth/installedLocations');
+  assert.equal(lookup.headers.authorization, `Bearer ${agencyJwt}`);
+  assert.equal(lookup.headers.version, '2021-07-28');
+  assert.equal(lookup.url.searchParams.get('companyId'), 'CO1');
+  assert.equal(lookup.url.searchParams.get('appId'), 'APP123');
+  assert.match(ghl.connectionProblem('LOC1') || '', /not installed in sub-account LOC1/);
+
+  await assert.rejects(ghl.getAccessToken('LOC2'), ghl.GhlApiError);
+  assert.match(ghl.connectionProblem('LOC2') || '', /VER-OLD/);
+  assert.match(ghl.connectionProblem('LOC2') || '', /VER-NEW/);
+});
+
 test('locations without any connection report that HighLevel is not connected', async () => {
   await assert.rejects(ghl.getAccessToken('LOC9'), ghl.GhlNotConnectedError);
   assert.match(ghl.connectionProblem('LOC9') || '', /not connected/i);

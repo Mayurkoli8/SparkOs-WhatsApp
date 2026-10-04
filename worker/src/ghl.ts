@@ -115,6 +115,41 @@ function agencyFor(locationId: string): CompanyConnection | undefined {
   return companies.find(c => c.locationIds.includes(locationId)) || (companies.length === 1 ? companies[0] : undefined);
 }
 
+function agencyTokenInfo(company: CompanyConnection): { appId?: string; versionId?: string } {
+  let claims: { oauthMeta?: { client?: string; versionId?: string } } = {};
+  try {
+    const payload = decrypt(company.accessToken).split('.')[1];
+    if (payload) claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch {
+    // opaque token; fall back to the configured client id
+  }
+  const client = claims.oauthMeta?.client || GHL_CLIENT_ID;
+  return { appId: client.split('-')[0] || undefined, versionId: claims.oauthMeta?.versionId };
+}
+
+// When HighLevel refuses a sub-account token, ask it whether the app is installed there and in which version.
+async function explainLocationAccess(company: CompanyConnection, locationId: string, agencyToken: string): Promise<string | null> {
+  const { appId, versionId } = agencyTokenInfo(company);
+  if (!appId) return null;
+  const query = new URLSearchParams({ companyId: company.companyId, appId, locationId, limit: '5' });
+  try {
+    const res = await fetch(`${GHL_BASE}/oauth/installedLocations?${query}`, {
+      headers: { Authorization: `Bearer ${agencyToken}`, Version: CONTACTS_VERSION, Accept: 'application/json' },
+      signal: AbortSignal.timeout(20_000)
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const entry = (data.locations || []).find((l: { _id?: string }) => l._id === locationId);
+    if (!entry || entry.isInstalled === false) return `the app is not installed in sub-account ${locationId}`;
+    if (versionId && entry.versionId && entry.versionId !== versionId) {
+      return `sub-account ${locationId} has app version ${entry.versionId}, but the agency authorized version ${versionId}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Agency installs get sub-account tokens from /oauth/locationToken; they carry no refresh token and are re-minted.
 async function mintLocationToken(company: CompanyConnection, locationId: string, retried = false): Promise<string> {
   const agencyToken = await refreshableToken(`company ${company.companyId}`, company, 'Company', retried);
@@ -132,7 +167,9 @@ async function mintLocationToken(company: CompanyConnection, locationId: string,
   const text = await res.text();
   if (!res.ok) {
     if (res.status === 401 && !retried && !/scope/i.test(text) && company.refreshToken) return mintLocationToken(company, locationId, true);
-    company.mintErrors = { ...company.mintErrors, [locationId]: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+    const explanation = res.status === 400 || res.status === 403 ? await explainLocationAccess(company, locationId, agencyToken) : null;
+    const raw = `HTTP ${res.status}: ${text.slice(0, 200)}`;
+    company.mintErrors = { ...company.mintErrors, [locationId]: explanation ? `${explanation} (${raw})` : raw };
     await save();
     throw new GhlApiError(`Could not create a sub-account token for ${locationId} from the agency install (HTTP ${res.status})`, res.status, text.slice(0, 1000));
   }
@@ -432,6 +469,12 @@ export function tokenClaims(locationId: string) {
 function agencyProblem(company: CompanyConnection, locationId: string) {
   const mintError = company.mintErrors?.[locationId];
   if (!mintError) return company.lastError || null;
+  if (mintError.startsWith('the app is not installed')) {
+    return `${mintError}. The app is authorized for the agency, but HighLevel only issues tokens for sub-accounts the app is installed in. Install it into ${locationId} (select that sub-account on the install screen that "Connect GHL" opens, or add it in the app's sub-account settings in your agency), then click "Connect GHL" again.`;
+  }
+  if (mintError.startsWith('sub-account')) {
+    return `${mintError}. Update the app in that sub-account to the current version (reinstall it there), then click "Connect GHL" again.`;
+  }
   return `the app is installed at the agency level and HighLevel refused to create a sub-account token for ${locationId} (${mintError}). Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
 }
 
