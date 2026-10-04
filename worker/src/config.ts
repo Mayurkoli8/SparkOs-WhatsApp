@@ -13,6 +13,9 @@ export const PROVIDER_ID = (env.GHL_CONVERSATION_PROVIDER_ID || '').trim();
 export const INBOUND_TYPE = env.GHL_INBOUND_TYPE || 'SMS';
 export const GHL_CLIENT_ID = env.GHL_CLIENT_ID || '';
 export const GHL_CLIENT_SECRET = env.GHL_CLIENT_SECRET || '';
+// Without GHL_CLIENT_SECRET the worker refreshes tokens through the web app (which holds the secret), e.g.
+// https://your-vercel-domain/api/oauth/refresh, authenticated with INTERNAL_API_KEY.
+export const TOKEN_REFRESH_URL = (env.TOKEN_REFRESH_URL || '').trim();
 export const SIGNATURE_CHECK_DISABLED = env.DISABLE_GHL_SIGNATURE === 'true';
 export const GHL_WEBHOOK_PUBLIC_KEY = env.GHL_WEBHOOK_PUBLIC_KEY;
 

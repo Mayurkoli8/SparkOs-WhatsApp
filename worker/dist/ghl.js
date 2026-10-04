@@ -93,24 +93,35 @@ async function refreshableToken(label, record, userType, forceRefresh) {
     // GHL refresh tokens are single-use, so concurrent callers must share one refresh.
     return singleFlight(`refresh:${label}`, () => refreshRecord(record, userType));
 }
-async function refreshRecord(record, userType) {
-    if (!config_1.GHL_CLIENT_ID || !config_1.GHL_CLIENT_SECRET) {
-        throw new Error('GHL_CLIENT_ID / GHL_CLIENT_SECRET are not set on the worker, so the HighLevel token cannot be refreshed.');
+function requestRefresh(refreshToken, userType) {
+    if (config_1.GHL_CLIENT_ID && config_1.GHL_CLIENT_SECRET) {
+        // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
+        const form = new URLSearchParams({
+            client_id: config_1.GHL_CLIENT_ID,
+            client_secret: config_1.GHL_CLIENT_SECRET,
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            user_type: userType
+        });
+        return fetch(`${config_1.GHL_BASE}/oauth/token`, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: form,
+            signal: AbortSignal.timeout(30_000)
+        });
     }
-    // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
-    const form = new URLSearchParams({
-        client_id: config_1.GHL_CLIENT_ID,
-        client_secret: config_1.GHL_CLIENT_SECRET,
-        grant_type: 'refresh_token',
-        refresh_token: (0, store_1.decrypt)(record.refreshToken),
-        user_type: userType
-    });
-    const res = await fetch(`${config_1.GHL_BASE}/oauth/token`, {
-        method: 'POST',
-        headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: form,
-        signal: AbortSignal.timeout(30_000)
-    });
+    if (config_1.TOKEN_REFRESH_URL) {
+        return fetch(config_1.TOKEN_REFRESH_URL, {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'x-internal-api-key': config_1.INTERNAL_API_KEY },
+            body: JSON.stringify({ refresh_token: refreshToken, user_type: userType }),
+            signal: AbortSignal.timeout(30_000)
+        });
+    }
+    throw new Error('Neither GHL_CLIENT_SECRET nor TOKEN_REFRESH_URL is set on the worker, so the HighLevel token cannot be refreshed.');
+}
+async function refreshRecord(record, userType) {
+    const res = await requestRefresh((0, store_1.decrypt)(record.refreshToken), userType);
     const text = await res.text();
     if (!res.ok) {
         record.lastError = `token refresh failed with HTTP ${res.status}: ${text.slice(0, 200)}`;

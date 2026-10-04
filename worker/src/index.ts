@@ -14,6 +14,7 @@ import {
   PROVIDER_ID,
   SIGNATURE_CHECK_DISABLED,
   SYNC_PHONE_MESSAGES,
+  TOKEN_REFRESH_URL,
   VOLUME_PATH
 } from './config';
 import { errorText, flushEvents, loadEvents, log, recentEvents, recordEvent } from './events';
@@ -311,7 +312,9 @@ app.get('/diagnostics', (_req, res) => {
       : { id: 'provider', level: 'warn', message: 'GHL_CONVERSATION_PROVIDER_ID is not set on the worker. Inbound messages only work if the app is the default SMS provider.' },
     GHL_CLIENT_ID && GHL_CLIENT_SECRET
       ? { id: 'oauth-client', level: 'ok', message: 'GHL client id and secret are set, so tokens can be refreshed.' }
-      : { id: 'oauth-client', level: 'error', message: 'GHL_CLIENT_ID / GHL_CLIENT_SECRET are missing on the worker; the HighLevel token will stop working after ~24h.' },
+      : TOKEN_REFRESH_URL
+        ? { id: 'oauth-client', level: 'ok', message: `Tokens are refreshed through the web app (${TOKEN_REFRESH_URL}).` }
+        : { id: 'oauth-client', level: 'error', message: 'Neither GHL_CLIENT_SECRET nor TOKEN_REFRESH_URL is set on the worker; the HighLevel token will stop working after ~24h.' },
     keySource === 'generated'
       ? { id: 'token-key', level: 'warn', message: 'TOKEN_ENCRYPTION_KEY is not set; using a key generated in the data directory.' }
       : { id: 'token-key', level: 'ok', message: keySource === 'env' ? 'Tokens are encrypted with TOKEN_ENCRYPTION_KEY.' : 'Tokens are encrypted with a key derived from TOKEN_ENCRYPTION_KEY.' },

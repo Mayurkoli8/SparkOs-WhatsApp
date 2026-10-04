@@ -1,4 +1,4 @@
-import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, PROVIDER_ID } from './config';
+import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, INTERNAL_API_KEY, PROVIDER_ID, TOKEN_REFRESH_URL } from './config';
 import { recordEvent } from './events';
 import { decrypt, encrypt, registry, save, type CompanyConnection, type GhlConnection } from './store';
 
@@ -70,24 +70,36 @@ async function refreshableToken(label: string, record: TokenRecord, userType: 'L
   return singleFlight(`refresh:${label}`, () => refreshRecord(record, userType));
 }
 
-async function refreshRecord(record: TokenRecord, userType: 'Location' | 'Company'): Promise<string> {
-  if (!GHL_CLIENT_ID || !GHL_CLIENT_SECRET) {
-    throw new Error('GHL_CLIENT_ID / GHL_CLIENT_SECRET are not set on the worker, so the HighLevel token cannot be refreshed.');
+function requestRefresh(refreshToken: string, userType: 'Location' | 'Company') {
+  if (GHL_CLIENT_ID && GHL_CLIENT_SECRET) {
+    // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
+    const form = new URLSearchParams({
+      client_id: GHL_CLIENT_ID,
+      client_secret: GHL_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      user_type: userType
+    });
+    return fetch(`${GHL_BASE}/oauth/token`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form,
+      signal: AbortSignal.timeout(30_000)
+    });
   }
-  // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
-  const form = new URLSearchParams({
-    client_id: GHL_CLIENT_ID,
-    client_secret: GHL_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: decrypt(record.refreshToken!),
-    user_type: userType
-  });
-  const res = await fetch(`${GHL_BASE}/oauth/token`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form,
-    signal: AbortSignal.timeout(30_000)
-  });
+  if (TOKEN_REFRESH_URL) {
+    return fetch(TOKEN_REFRESH_URL, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'x-internal-api-key': INTERNAL_API_KEY },
+      body: JSON.stringify({ refresh_token: refreshToken, user_type: userType }),
+      signal: AbortSignal.timeout(30_000)
+    });
+  }
+  throw new Error('Neither GHL_CLIENT_SECRET nor TOKEN_REFRESH_URL is set on the worker, so the HighLevel token cannot be refreshed.');
+}
+
+async function refreshRecord(record: TokenRecord, userType: 'Location' | 'Company'): Promise<string> {
+  const res = await requestRefresh(decrypt(record.refreshToken!), userType);
   const text = await res.text();
   if (!res.ok) {
     record.lastError = `token refresh failed with HTTP ${res.status}: ${text.slice(0, 200)}`;

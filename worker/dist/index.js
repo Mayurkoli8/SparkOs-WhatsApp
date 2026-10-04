@@ -323,7 +323,9 @@ app.get('/diagnostics', (_req, res) => {
             : { id: 'provider', level: 'warn', message: 'GHL_CONVERSATION_PROVIDER_ID is not set on the worker. Inbound messages only work if the app is the default SMS provider.' },
         config_1.GHL_CLIENT_ID && config_1.GHL_CLIENT_SECRET
             ? { id: 'oauth-client', level: 'ok', message: 'GHL client id and secret are set, so tokens can be refreshed.' }
-            : { id: 'oauth-client', level: 'error', message: 'GHL_CLIENT_ID / GHL_CLIENT_SECRET are missing on the worker; the HighLevel token will stop working after ~24h.' },
+            : config_1.TOKEN_REFRESH_URL
+                ? { id: 'oauth-client', level: 'ok', message: `Tokens are refreshed through the web app (${config_1.TOKEN_REFRESH_URL}).` }
+                : { id: 'oauth-client', level: 'error', message: 'Neither GHL_CLIENT_SECRET nor TOKEN_REFRESH_URL is set on the worker; the HighLevel token will stop working after ~24h.' },
         keySource === 'generated'
             ? { id: 'token-key', level: 'warn', message: 'TOKEN_ENCRYPTION_KEY is not set; using a key generated in the data directory.' }
             : { id: 'token-key', level: 'ok', message: keySource === 'env' ? 'Tokens are encrypted with TOKEN_ENCRYPTION_KEY.' : 'Tokens are encrypted with a key derived from TOKEN_ENCRYPTION_KEY.' },
