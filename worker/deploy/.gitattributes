@@ -1,0 +1,2 @@
+# Shell scripts, Dockerfile and Caddyfile run on Linux; keep LF even in Windows checkouts.
+* text=auto eol=lf
