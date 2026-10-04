@@ -1,0 +1,38 @@
+# Worker + Caddy (automatic HTTPS from Let's Encrypt). Run from this folder:
+#   cp .env.example .env   # fill it in
+#   docker compose up -d --build
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      PORT: "3001"
+    volumes:
+      - worker-data:/app/data
+    expose:
+      - "3001"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - worker
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      WORKER_DOMAIN: ${WORKER_DOMAIN:?Set WORKER_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  # WhatsApp sessions, HighLevel tokens and the activity log. Survives rebuilds and reboots.
+  worker-data:
+  caddy-data:
+  caddy-config:
