@@ -43,7 +43,9 @@ function safeEqual(a: string, b: string) {
 }
 
 app.use((req, res, next) => {
-  if (req.path === '/' || req.path === '/health' || req.path === DIRECT_WEBHOOK_PATH) return next();
+  // The direct webhook path may skip the internal key only while X-GHL-Signature is enforced; never fail open.
+  const signedWebhook = req.path === DIRECT_WEBHOOK_PATH && !SIGNATURE_CHECK_DISABLED;
+  if (req.path === '/' || req.path === '/health' || signedWebhook) return next();
   if (!INTERNAL_API_KEY || !safeEqual(req.header('x-internal-api-key') || '', INTERNAL_API_KEY)) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
