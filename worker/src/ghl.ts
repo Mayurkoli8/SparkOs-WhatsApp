@@ -435,8 +435,12 @@ const PROVIDER_MISMATCH = /CONVERSATION_PROVIDER_MISMATCH|Incorrect conversation
 
 // HighLevel has no API to read a provider's type, and a mismatched type is rejected before anything is created,
 // so try the plausible types once and remember the one HighLevel accepts.
+export function inboundTypeCandidates() {
+  return [...new Set([registry.settings.inboundType, INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t): t is string => Boolean(t)))];
+}
+
 export async function addInboundMessageDetectingType(locationId: string, input: InboundInput) {
-  const candidates = [...new Set([registry.settings.inboundType, INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t): t is string => Boolean(t)))];
+  const candidates = inboundTypeCandidates();
   const rejected: string[] = [];
   for (const type of candidates) {
     try {

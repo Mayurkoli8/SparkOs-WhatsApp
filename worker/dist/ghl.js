@@ -10,6 +10,7 @@ exports.saveConnection = saveConnection;
 exports.ghlRequest = ghlRequest;
 exports.upsertContact = upsertContact;
 exports.findOrCreateConversation = findOrCreateConversation;
+exports.inboundTypeCandidates = inboundTypeCandidates;
 exports.addInboundMessageDetectingType = addInboundMessageDetectingType;
 exports.getContactPhone = getContactPhone;
 exports.addInboundMessage = addInboundMessage;
@@ -439,8 +440,11 @@ async function findOrCreateConversation(locationId, contactId) {
 const PROVIDER_MISMATCH = /CONVERSATION_PROVIDER_MISMATCH|Incorrect conversationProviderId/i;
 // HighLevel has no API to read a provider's type, and a mismatched type is rejected before anything is created,
 // so try the plausible types once and remember the one HighLevel accepts.
+function inboundTypeCandidates() {
+    return [...new Set([store_1.registry.settings.inboundType, config_1.INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t) => Boolean(t)))];
+}
 async function addInboundMessageDetectingType(locationId, input) {
-    const candidates = [...new Set([store_1.registry.settings.inboundType, config_1.INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t) => Boolean(t)))];
+    const candidates = inboundTypeCandidates();
     const rejected = [];
     for (const type of candidates) {
         try {

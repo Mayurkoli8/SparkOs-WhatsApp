@@ -319,7 +319,7 @@ app.get('/diagnostics', (_req, res) => {
       : {
           id: 'inbound-type',
           level: 'ok',
-          message: `The provider's message type is detected on the first synced message (trying ${INBOUND_TYPE} first, then SMS, Custom, WhatsApp).`
+          message: `The provider's message type is detected on the first synced message (trying ${ghl.inboundTypeCandidates().join(', ')} in that order).`
         },
     unlinkedLocations.length
       ? { id: 'location-match', level: 'error', message: `These instances' locations have no HighLevel connection: ${unlinkedLocations.join(', ')}` }
@@ -335,7 +335,7 @@ app.get('/diagnostics', (_req, res) => {
     dataDir: DATA_DIR,
     persistentVolume: persistent,
     providerId: PROVIDER_ID || null,
-    inboundType: INBOUND_TYPE,
+    inboundType: registry.settings.inboundType || INBOUND_TYPE,
     syncPhoneMessages: SYNC_PHONE_MESSAGES,
     checks,
     connections: Object.keys(registry.ghl).map(connectionSummary),
