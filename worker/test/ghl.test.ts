@@ -109,6 +109,23 @@ test('the provider message type is detected once and remembered', async () => {
   assert.deepEqual(types, ['SMS', 'Custom', 'Custom']);
 });
 
+test('the real provider id is learned from a message sent through the provider', async () => {
+  registry.settings = {};
+  on('GET', '/conversations/messages/GM9', () => ({ json: { id: 'GM9', conversationProviderId: 'REALPROV', messageType: 'TYPE_CUSTOM_PROVIDER_SMS' } }));
+  const inboundBodies: any[] = [];
+  on('POST', '/conversations/messages/inbound', call => {
+    inboundBodies.push(call.body);
+    return { json: { success: true, messageId: 'GM10' } };
+  });
+
+  assert.equal(await ghl.learnProviderFromMessage('LOC1', 'GM9'), 'REALPROV');
+  assert.equal(registry.settings.providerId, 'REALPROV');
+  assert.equal(ghl.effectiveProviderId(), 'REALPROV');
+
+  await ghl.addInboundMessage('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' });
+  assert.equal(inboundBodies[0].conversationProviderId, 'REALPROV');
+});
+
 test('a provider HighLevel rejects for every type is reported as not active', async () => {
   registry.settings = {};
   on('POST', '/conversations/messages/inbound', () => ({
@@ -118,7 +135,8 @@ test('a provider HighLevel rejects for every type is reported as not active', as
 
   await assert.rejects(
     ghl.addInboundMessageDetectingType('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' }),
-    (err: unknown) => err instanceof Error && /provider-123/.test(err.message) && /SMS, Custom, WhatsApp/.test(err.message)
+    (err: unknown) =>
+      err instanceof Error && /provider-123/.test(err.message) && /SMS, Custom, WhatsApp/.test(err.message) && /GHL_CONVERSATION_PROVIDER_ID/.test(err.message)
   );
   assert.equal(callsTo('POST', '/conversations/messages/inbound').length, 3);
 });

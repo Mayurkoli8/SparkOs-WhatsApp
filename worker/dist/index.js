@@ -48,18 +48,21 @@ const signature_1 = require("./signature");
 const startedAt = new Date().toISOString();
 const ghlPublicKey = (0, signature_1.loadGhlPublicKey)(config_1.GHL_WEBHOOK_PUBLIC_KEY);
 const WEBHOOK_PATH = '/webhooks/ghl/outbound';
+// HighLevel may also be pointed straight at the worker; that path is authenticated by X-GHL-Signature alone.
+const DIRECT_WEBHOOK_PATH = '/api/oauth/outbound';
+const WEBHOOK_PATHS = [WEBHOOK_PATH, DIRECT_WEBHOOK_PATH];
 const app = (0, express_1.default)();
 app.disable('x-powered-by');
 // The delivery webhook is verified against its exact bytes, so it must not go through the JSON parser.
 const jsonBody = express_1.default.json({ limit: '2mb' });
-app.use((req, res, next) => (req.path === WEBHOOK_PATH ? next() : jsonBody(req, res, next)));
+app.use((req, res, next) => (WEBHOOK_PATHS.includes(req.path) ? next() : jsonBody(req, res, next)));
 function safeEqual(a, b) {
     const left = Buffer.from(a);
     const right = Buffer.from(b);
     return left.length === right.length && node_crypto_1.default.timingSafeEqual(left, right);
 }
 app.use((req, res, next) => {
-    if (req.path === '/' || req.path === '/health')
+    if (req.path === '/' || req.path === '/health' || req.path === DIRECT_WEBHOOK_PATH)
         return next();
     if (!config_1.INTERNAL_API_KEY || !safeEqual(req.header('x-internal-api-key') || '', config_1.INTERNAL_API_KEY)) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -271,7 +274,7 @@ app.post('/integrations/ghl/:locationId/test', async (req, res) => {
     }
     res.json(await checkConnection(locationId));
 });
-app.post(WEBHOOK_PATH, express_1.default.raw({ type: () => true, limit: '2mb' }), (req, res) => {
+app.post(WEBHOOK_PATHS, express_1.default.raw({ type: () => true, limit: '2mb' }), (req, res) => {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const signature = req.header('x-ghl-signature') || undefined;
     if (!config_1.SIGNATURE_CHECK_DISABLED && !(0, signature_1.verifyGhlSignature)(raw, signature, ghlPublicKey.key)) {
@@ -308,7 +311,13 @@ app.get('/diagnostics', (_req, res) => {
                 ? { id: 'storage', level: 'error', message: `DATA_DIR (${config_1.DATA_DIR}) is outside the attached volume (${config_1.VOLUME_PATH}); sessions and tokens are lost on every deploy.` }
                 : { id: 'storage', level: 'warn', message: `No Railway volume detected. Unless ${config_1.DATA_DIR} is on a persistent disk, WhatsApp sessions and HighLevel tokens are lost on every redeploy.` },
         config_1.PROVIDER_ID
-            ? { id: 'provider', level: 'ok', message: `Conversation provider id: ${config_1.PROVIDER_ID}` }
+            ? store_1.registry.settings.providerId && store_1.registry.settings.providerId !== config_1.PROVIDER_ID
+                ? {
+                    id: 'provider',
+                    level: 'warn',
+                    message: `Using conversation provider id ${store_1.registry.settings.providerId}, learned from HighLevel. GHL_CONVERSATION_PROVIDER_ID on the worker is ${config_1.PROVIDER_ID}; update it to ${store_1.registry.settings.providerId}.`
+                }
+                : { id: 'provider', level: 'ok', message: `Conversation provider id: ${config_1.PROVIDER_ID}${store_1.registry.settings.providerId ? ' (confirmed by HighLevel)' : ''}` }
             : { id: 'provider', level: 'warn', message: 'GHL_CONVERSATION_PROVIDER_ID is not set on the worker. Inbound messages only work if the app is the default SMS provider.' },
         config_1.GHL_CLIENT_ID && config_1.GHL_CLIENT_SECRET
             ? { id: 'oauth-client', level: 'ok', message: 'GHL client id and secret are set, so tokens can be refreshed.' }
@@ -346,7 +355,7 @@ app.get('/diagnostics', (_req, res) => {
         startedAt,
         dataDir: config_1.DATA_DIR,
         persistentVolume: persistent,
-        providerId: config_1.PROVIDER_ID || null,
+        providerId: ghl.effectiveProviderId() || null,
         inboundType: store_1.registry.settings.inboundType || config_1.INBOUND_TYPE,
         syncPhoneMessages: config_1.SYNC_PHONE_MESSAGES,
         checks,

@@ -12,6 +12,8 @@ exports.upsertContact = upsertContact;
 exports.findOrCreateConversation = findOrCreateConversation;
 exports.inboundTypeCandidates = inboundTypeCandidates;
 exports.addInboundMessageDetectingType = addInboundMessageDetectingType;
+exports.effectiveProviderId = effectiveProviderId;
+exports.learnProviderFromMessage = learnProviderFromMessage;
 exports.getContactPhone = getContactPhone;
 exports.addInboundMessage = addInboundMessage;
 exports.updateMessageStatus = updateMessageStatus;
@@ -462,7 +464,28 @@ async function addInboundMessageDetectingType(locationId, input) {
             rejected.push(type);
         }
     }
-    throw new Error(`HighLevel rejected conversation provider ${config_1.PROVIDER_ID || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. The provider is not active in this sub-account: in the Marketplace app open Conversation Providers, check that this is the provider's ID, that its type is SMS and that it is saved, then confirm it appears in the sub-account under Settings → Conversation Providers or Settings → Phone Numbers → Advanced Settings → SMS Provider.`);
+    throw new Error(`HighLevel rejected conversation provider ${effectiveProviderId() || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`);
+}
+function effectiveProviderId() {
+    return store_1.registry.settings.providerId || config_1.PROVIDER_ID;
+}
+// A message sent through the provider records the provider id HighLevel really uses; adopt it if it differs.
+async function learnProviderFromMessage(locationId, messageId) {
+    const message = await getMessage(locationId, messageId);
+    const providerId = message?.conversationProviderId;
+    if (!providerId)
+        return null;
+    if (providerId !== effectiveProviderId()) {
+        const previous = effectiveProviderId();
+        store_1.registry.settings.providerId = providerId;
+        store_1.registry.settings.inboundType = undefined;
+        await (0, store_1.save)();
+        (0, events_1.recordEvent)('warn', `Conversation provider id corrected from ${previous || '(none)'} to ${providerId}, read from a message HighLevel sent through the provider`, {
+            locationId,
+            detail: `message type: ${message.messageType || 'unknown'}`
+        });
+    }
+    return providerId;
 }
 async function getContactPhone(locationId, contactId) {
     const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: exports.CONTACTS_VERSION });
@@ -473,7 +496,7 @@ async function addInboundMessage(locationId, input) {
         type: input.type || config_1.INBOUND_TYPE,
         contactId: input.contactId,
         conversationId: input.conversationId,
-        conversationProviderId: config_1.PROVIDER_ID || undefined,
+        conversationProviderId: effectiveProviderId() || undefined,
         message: input.message,
         attachments: input.attachments?.length ? input.attachments : undefined,
         altId: input.altId,

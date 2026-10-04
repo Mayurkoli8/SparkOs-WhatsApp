@@ -457,8 +457,30 @@ export async function addInboundMessageDetectingType(locationId: string, input: 
     }
   }
   throw new Error(
-    `HighLevel rejected conversation provider ${PROVIDER_ID || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. The provider is not active in this sub-account: in the Marketplace app open Conversation Providers, check that this is the provider's ID, that its type is SMS and that it is saved, then confirm it appears in the sub-account under Settings → Conversation Providers or Settings → Phone Numbers → Advanced Settings → SMS Provider.`
+    `HighLevel rejected conversation provider ${effectiveProviderId() || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`
   );
+}
+
+export function effectiveProviderId() {
+  return registry.settings.providerId || PROVIDER_ID;
+}
+
+// A message sent through the provider records the provider id HighLevel really uses; adopt it if it differs.
+export async function learnProviderFromMessage(locationId: string, messageId: string): Promise<string | null> {
+  const message = await getMessage(locationId, messageId);
+  const providerId: string | undefined = message?.conversationProviderId;
+  if (!providerId) return null;
+  if (providerId !== effectiveProviderId()) {
+    const previous = effectiveProviderId();
+    registry.settings.providerId = providerId;
+    registry.settings.inboundType = undefined;
+    await save();
+    recordEvent('warn', `Conversation provider id corrected from ${previous || '(none)'} to ${providerId}, read from a message HighLevel sent through the provider`, {
+      locationId,
+      detail: `message type: ${message.messageType || 'unknown'}`
+    });
+  }
+  return providerId;
 }
 
 export async function getContactPhone(locationId: string, contactId: string): Promise<string | null> {
@@ -471,7 +493,7 @@ export async function addInboundMessage(locationId: string, input: InboundInput)
     type: input.type || INBOUND_TYPE,
     contactId: input.contactId,
     conversationId: input.conversationId,
-    conversationProviderId: PROVIDER_ID || undefined,
+    conversationProviderId: effectiveProviderId() || undefined,
     message: input.message,
     attachments: input.attachments?.length ? input.attachments : undefined,
     altId: input.altId,

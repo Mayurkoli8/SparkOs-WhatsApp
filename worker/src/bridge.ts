@@ -532,10 +532,21 @@ async function sendTracked(sock: WASocket, jid: string, content: AnyMessageConte
   if (delivery) deliveries.set(id, delivery);
 }
 
+let providerVerified = false;
+
 export function handleProviderOutbound(payload: ProviderOutboundPayload) {
   deliverToWhatsApp(payload).catch(err =>
     recordEvent('error', 'Unexpected error while delivering a HighLevel message', { locationId: payload.locationId, detail: errorText(err) })
   );
+  // The message HighLevel just routed through the provider records the provider's real id; check it once per start.
+  const { locationId, messageId } = payload;
+  if (!providerVerified && locationId && messageId && ghl.isConnected(locationId)) {
+    providerVerified = true;
+    ghl.learnProviderFromMessage(locationId, messageId).catch(err => {
+      providerVerified = false;
+      recordEvent('warn', 'Could not read the provider id from the HighLevel message', { locationId, detail: errorText(err) });
+    });
+  }
 }
 
 async function deliverToWhatsApp(payload: ProviderOutboundPayload) {

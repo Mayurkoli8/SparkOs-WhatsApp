@@ -51,8 +51,9 @@ export type Registry = {
   instances: Record<string, InstanceRecord>;
   ghl: Record<string, GhlConnection>;
   companies: Record<string, CompanyConnection>;
-  // Learned from HighLevel: the inbound message type its conversation provider accepts.
-  settings: { inboundType?: string };
+  // Learned from HighLevel: the inbound message type its conversation provider accepts, and the provider id it
+  // actually uses (read from a message sent through the provider).
+  settings: { inboundType?: string; providerId?: string };
 };
 
 export const REGISTRY_FILE = path.join(DATA_DIR, 'registry.json');
