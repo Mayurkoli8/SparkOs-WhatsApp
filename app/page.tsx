@@ -15,7 +15,11 @@ type Instance = {
   ghlConnected?: boolean;
 };
 
-type GhlConnection = { locationId: string; connected: boolean; userType?: string | null; lastError?: string | null; updatedAt?: string };
+type GhlStatus = {
+  agencies: { companyId: string; canMint: boolean }[];
+  // Every location the bridge needs a token for, mapped to what is wrong with it (null when usable).
+  problems: Record<string, string | null>;
+};
 type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
 type BridgeEvent = { at: string; level: 'info' | 'warn' | 'error'; message: string; locationId?: string; instanceId?: string; detail?: string };
 type Diagnostics = {
@@ -52,7 +56,7 @@ export default function Home() {
   const [locationId, setLocationId] = useState('');
   const [name, setName] = useState('WhatsApp Instance 1');
   const [instances, setInstances] = useState<Instance[]>([]);
-  const [ghl, setGhl] = useState<GhlConnection[]>([]);
+  const [ghl, setGhl] = useState<GhlStatus>({ agencies: [], problems: {} });
   const [diag, setDiag] = useState<Diagnostics | null>(null);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -77,7 +81,10 @@ export default function Home() {
       const [a, b] = await Promise.all([fetch('/api/instances', { cache: 'no-store' }), fetch('/api/oauth/status', { cache: 'no-store' })]);
       if (!a.ok) throw new Error((await a.json().catch(() => null))?.error || `Worker returned HTTP ${a.status}`);
       setInstances((await a.json()).instances ?? []);
-      if (b.ok) setGhl((await b.json()).connections ?? []);
+      if (b.ok) {
+        const data = await b.json();
+        setGhl({ agencies: data.agencies ?? [], problems: data.problems ?? {} });
+      }
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not reach the backend');
@@ -192,28 +199,39 @@ export default function Home() {
             <h2>1. Connect HighLevel</h2>
             <span>OAuth</span>
           </div>
-          <p className="muted">Install the Marketplace app into the sub-account (pick the location on the HighLevel screen). The token is stored on the worker.</p>
+          <p className="muted">
+            Install the Marketplace app into the sub-account, or at the agency level if the app has the oauth.readonly and oauth.write scopes. Tokens are stored on the worker.
+          </p>
           <button className="primary" onClick={() => (window.location.href = '/api/oauth/install')}>
             Connect GHL
           </button>
           <div className="connections">
-            {ghl.length === 0 ? (
+            {Object.keys(ghl.problems).length === 0 && ghl.agencies.length === 0 ? (
               <span className="muted">No GHL locations connected yet.</span>
             ) : (
-              ghl.map(c => (
-                <div className="conn" key={c.locationId}>
-                  <span className={`dot ${c.lastError ? 'bad' : 'good'}`} />
-                  <code>{c.locationId}</code>
-                  <button className="ghost small" onClick={() => setLocationId(c.locationId)}>
-                    Use
-                  </button>
-                  <button className="ghost small" onClick={() => void testConnection(c.locationId)}>
-                    Test
-                  </button>
-                  <b>{c.lastError ? 'Reconnect needed' : 'Connected'}</b>
-                  {(tests[c.locationId] || c.lastError) && <div className="conninfo">{tests[c.locationId] || c.lastError}</div>}
-                </div>
-              ))
+              <>
+                {ghl.agencies.map(a => (
+                  <div className="conn" key={a.companyId}>
+                    <span className={`dot ${a.canMint ? 'good' : 'bad'}`} />
+                    Agency <code>{a.companyId}</code>
+                    <b>{a.canMint ? 'Agency install' : 'Agency install · missing oauth.write'}</b>
+                  </div>
+                ))}
+                {Object.entries(ghl.problems).map(([loc, problem]) => (
+                  <div className="conn" key={loc}>
+                    <span className={`dot ${problem ? 'bad' : 'good'}`} />
+                    <code>{loc}</code>
+                    <button className="ghost small" onClick={() => setLocationId(loc)}>
+                      Use
+                    </button>
+                    <button className="ghost small" onClick={() => void testConnection(loc)}>
+                      Test
+                    </button>
+                    <b>{problem ? 'Needs attention' : 'Connected'}</b>
+                    {(tests[loc] || problem) && <div className="conninfo">{tests[loc] || problem}</div>}
+                  </div>
+                ))}
+              </>
             )}
           </div>
         </div>

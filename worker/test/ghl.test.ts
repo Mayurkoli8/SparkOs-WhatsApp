@@ -32,6 +32,7 @@ beforeEach(async () => {
   routes = [];
   await loadRegistry();
   await initTokenKey();
+  registry.companies = {};
   registry.ghl = {
     LOC1: {
       locationId: 'LOC1',

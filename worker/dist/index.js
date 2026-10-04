@@ -76,7 +76,7 @@ const publicInstance = ({ id, name, locationId, status, phone, createdAt, update
     updatedAt,
     qr: qr || null,
     lastError: lastError || null,
-    ghlConnected: Boolean(store_1.registry.ghl[locationId])
+    ghlConnected: ghl.isConnected(locationId)
 });
 function sendError(res, err, status = 500) {
     res.status(status).json({ error: (0, events_1.errorText)(err) });
@@ -103,7 +103,7 @@ app.post('/instances', async (req, res) => {
         const id = node_crypto_1.default.randomUUID();
         store_1.registry.instances[id] = { id, name, locationId, status: 'starting', createdAt: new Date().toISOString(), qr: null, lastError: null };
         await (0, store_1.save)();
-        if (!store_1.registry.ghl[locationId])
+        if (!ghl.isConnected(locationId))
             (0, events_1.recordEvent)('warn', `Instance created for ${locationId}, which is not connected to HighLevel yet`, { instanceId: id, locationId });
         await bridge.startInstance(id);
         res.json({ instance: publicInstance(store_1.registry.instances[id]) });
@@ -168,7 +168,39 @@ function connectionSummary(locationId) {
         updatedAt: conn.updatedAt
     };
 }
-app.get('/integrations/ghl', (_req, res) => res.json({ connections: Object.keys(store_1.registry.ghl).map(connectionSummary) }));
+function agencySummary(companyId) {
+    const company = store_1.registry.companies[companyId];
+    return {
+        companyId,
+        scope: company.scope || null,
+        canMint: (company.scope || '').split(/\s+/).includes('oauth.write'),
+        locationIds: company.locationIds,
+        mintErrors: company.mintErrors || {},
+        lastError: company.lastError || null,
+        updatedAt: company.updatedAt
+    };
+}
+// Locations the bridge needs a HighLevel token for: those with instances plus those already connected.
+function knownLocations() {
+    return [...new Set([...Object.values(store_1.registry.instances).map(i => i.locationId), ...Object.keys(store_1.registry.ghl)])];
+}
+app.get('/integrations/ghl', (_req, res) => res.json({
+    connections: Object.keys(store_1.registry.ghl).map(connectionSummary),
+    agencies: Object.keys(store_1.registry.companies).map(agencySummary),
+    problems: Object.fromEntries(knownLocations().map(l => [l, ghl.connectionProblem(l)]))
+}));
+// Lets the web app record OAuth outcomes in the activity log.
+app.post('/events', (req, res) => {
+    const { level, message, detail, locationId } = req.body || {};
+    if (!['info', 'warn', 'error'].includes(level) || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: 'level and message required' });
+    }
+    (0, events_1.recordEvent)(level, message.slice(0, 300), {
+        locationId: typeof locationId === 'string' ? locationId : undefined,
+        detail: typeof detail === 'string' ? detail : undefined
+    });
+    res.json({ ok: true });
+});
 async function checkConnection(locationId) {
     try {
         await ghl.testConnection(locationId);
@@ -183,28 +215,53 @@ async function checkConnection(locationId) {
         };
     }
 }
+async function verifyLocation(locationId) {
+    const check = await checkConnection(locationId);
+    const problem = ghl.connectionProblem(locationId);
+    if (check.ok && !problem)
+        (0, events_1.recordEvent)('info', `HighLevel connected for location ${locationId}`, { locationId });
+    else
+        (0, events_1.recordEvent)('error', `HighLevel connection for ${locationId} is not usable: ${problem || 'a test API call failed'}`, {
+            locationId,
+            detail: check.ok ? undefined : `${check.error} ${check.body || ''}`
+        });
+    return { locationId, ...check, problem };
+}
 app.post('/integrations/ghl/connect', async (req, res) => {
     try {
-        const { locationId, accessToken, refreshToken, expiresIn, scope, userId, companyId, userType } = req.body || {};
-        if (!locationId || !accessToken)
-            return res.status(400).json({ error: 'locationId and accessToken required' });
+        const { locationId, accessToken, refreshToken, expiresIn, scope, userId, companyId, userType, approvedLocations } = req.body || {};
+        if (!accessToken)
+            return res.status(400).json({ error: 'accessToken required' });
+        const claims = ghl.claimsOf(accessToken);
+        if (userType === 'Company' || claims?.authClass === 'Company') {
+            const agencyId = companyId || claims?.authClassId;
+            if (!agencyId)
+                return res.status(400).json({ error: 'companyId required for an agency install' });
+            const approved = Array.isArray(approvedLocations) ? approvedLocations.filter((l) => typeof l === 'string') : [];
+            const targets = [...new Set([...(locationId ? [locationId] : []), ...Object.values(store_1.registry.instances).map(i => i.locationId)])];
+            await ghl.saveAgencyConnection({ companyId: agencyId, accessToken, refreshToken, expiresIn, scope, userId, locationIds: [...approved, ...targets] });
+            (0, events_1.recordEvent)('info', `HighLevel agency install saved for company ${agencyId}`, { detail: `scopes: ${scope || 'none reported'}` });
+            const locations = [];
+            for (const target of targets)
+                locations.push(await verifyLocation(target));
+            return res.json({ ok: true, agency: true, companyId: agencyId, locations });
+        }
+        if (!locationId)
+            return res.status(400).json({ error: 'locationId required for a sub-account install' });
         await ghl.saveConnection({ locationId, accessToken, refreshToken, expiresIn, scope, userId, companyId, userType });
-        const check = await checkConnection(locationId);
-        const problem = ghl.connectionProblem(locationId);
-        if (check.ok && !problem)
-            (0, events_1.recordEvent)('info', `HighLevel connected for location ${locationId}`, { locationId });
-        else
-            (0, events_1.recordEvent)('error', `HighLevel token saved for ${locationId}, but ${problem || 'a test API call failed'}`, { locationId, detail: check.ok ? undefined : `${check.error} ${check.body || ''}` });
-        res.json({ ok: true, locationId, check });
+        const result = await verifyLocation(locationId);
+        res.json({ ok: true, agency: false, locationId, locations: [result], check: result });
     }
     catch (err) {
         sendError(res, err);
     }
 });
 app.post('/integrations/ghl/:locationId/test', async (req, res) => {
-    if (!store_1.registry.ghl[req.params.locationId])
+    const { locationId } = req.params;
+    if (!ghl.isConnected(locationId)) {
         return res.status(404).json({ error: 'Location is not connected' });
-    res.json(await checkConnection(req.params.locationId));
+    }
+    res.json(await checkConnection(locationId));
 });
 app.post(WEBHOOK_PATH, express_1.default.raw({ type: () => true, limit: '2mb' }), (req, res) => {
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
@@ -228,12 +285,14 @@ app.post(WEBHOOK_PATH, express_1.default.raw({ type: () => true, limit: '2mb' })
 });
 app.get('/diagnostics', (_req, res) => {
     const instances = Object.values(store_1.registry.instances);
-    const locations = Object.keys(store_1.registry.ghl);
+    const locations = knownLocations();
     const relative = config_1.VOLUME_PATH ? node_path_1.default.relative(config_1.VOLUME_PATH, config_1.DATA_DIR) : null;
     const persistent = relative === null ? null : !relative.startsWith('..') && !node_path_1.default.isAbsolute(relative);
     const keySource = (0, store_1.getTokenKeySource)();
-    const unlinkedLocations = [...new Set(instances.map(i => i.locationId))].filter(l => !store_1.registry.ghl[l]);
-    const brokenLocations = locations.map(l => [l, ghl.connectionProblem(l)]).filter(([, problem]) => problem);
+    const problems = locations.map(l => [l, ghl.connectionProblem(l)]);
+    const unlinkedLocations = problems.filter(([, p]) => p?.startsWith('HighLevel is not connected')).map(([l]) => l);
+    const brokenLocations = problems.filter(([, p]) => p && !p.startsWith('HighLevel is not connected'));
+    const anyConnection = Object.keys(store_1.registry.ghl).length > 0 || Object.keys(store_1.registry.companies).length > 0;
     const checks = [
         persistent === true
             ? { id: 'storage', level: 'ok', message: `Data is stored on the attached volume (${config_1.DATA_DIR}).` }
@@ -254,11 +313,18 @@ app.get('/diagnostics', (_req, res) => {
             : ghlPublicKey.error
                 ? { id: 'signature', level: 'warn', message: ghlPublicKey.error }
                 : { id: 'signature', level: 'ok', message: 'Delivery webhooks must carry a valid X-GHL-Signature.' },
-        !locations.length
+        !anyConnection
             ? { id: 'ghl', level: 'error', message: 'No HighLevel location is connected. Click "Connect GHL" and install the app into the sub-account.' }
             : brokenLocations.length
                 ? { id: 'ghl', level: 'error', message: brokenLocations.map(([l, problem]) => `HighLevel connection for ${l}: ${problem}`).join(' ') }
-                : { id: 'ghl', level: 'ok', message: `HighLevel connected for ${locations.join(', ')}` },
+                : { id: 'ghl', level: 'ok', message: `HighLevel connected for ${locations.filter(l => !unlinkedLocations.includes(l)).join(', ') || 'no locations yet'}` },
+        /^(SMS|Custom)$/.test(config_1.INBOUND_TYPE)
+            ? { id: 'inbound-type', level: 'ok', message: `Inbound messages are added as type ${config_1.INBOUND_TYPE}.` }
+            : {
+                id: 'inbound-type',
+                level: 'warn',
+                message: `GHL_INBOUND_TYPE is "${config_1.INBOUND_TYPE}". HighLevel documents custom SMS providers with type SMS; other types are routed to HighLevel's own channels, so replies may not reach this bridge. Set GHL_INBOUND_TYPE=SMS on the worker (or remove it).`
+            },
         unlinkedLocations.length
             ? { id: 'location-match', level: 'error', message: `These instances' locations have no HighLevel connection: ${unlinkedLocations.join(', ')}` }
             : { id: 'location-match', level: 'ok', message: 'Every instance belongs to a connected HighLevel location.' },
@@ -276,7 +342,8 @@ app.get('/diagnostics', (_req, res) => {
         inboundType: config_1.INBOUND_TYPE,
         syncPhoneMessages: config_1.SYNC_PHONE_MESSAGES,
         checks,
-        connections: locations.map(connectionSummary),
+        connections: Object.keys(store_1.registry.ghl).map(connectionSummary),
+        agencies: Object.keys(store_1.registry.companies).map(agencySummary),
         instances: instances.map(publicInstance),
         events: (0, events_1.recentEvents)(100)
     });
@@ -289,8 +356,19 @@ async function main() {
     if (ghlPublicKey.error)
         (0, events_1.recordEvent)('warn', ghlPublicKey.error);
     (0, events_1.recordEvent)('info', `Worker started (build ${config_1.BUILD}${config_1.COMMIT ? `, commit ${config_1.COMMIT}` : ''})`);
+    const moved = await ghl.migrateAgencyTokens();
+    if (moved.length)
+        (0, events_1.recordEvent)('warn', `Found agency (Company) tokens stored as sub-account tokens; moved them to agency connections: ${moved.join(', ')}`);
     const server = app.listen(config_1.PORT, '0.0.0.0', () => events_1.log.info({ port: config_1.PORT, dataDir: config_1.DATA_DIR }, 'Worker listening'));
     await bridge.resumeInstances();
+    // Agency installs: get a sub-account token for every instance location up front so problems show immediately.
+    for (const locationId of new Set(Object.values(store_1.registry.instances).map(i => i.locationId))) {
+        if (store_1.registry.ghl[locationId]?.source === 'direct')
+            continue;
+        if (ghl.connectionProblem(locationId)?.startsWith('HighLevel is not connected'))
+            continue;
+        void verifyLocation(locationId).catch(err => events_1.log.warn({ err, locationId }, 'Agency token warm-up failed'));
+    }
     const stop = async (signal) => {
         events_1.log.info({ signal }, 'Shutting down');
         bridge.shutdown();

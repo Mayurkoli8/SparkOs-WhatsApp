@@ -28,15 +28,33 @@ export type GhlConnection = {
   updatedAt: string;
   lastError?: string | null;
   refreshFailedAt?: number;
+  // 'agency' = minted from an agency (Company) connection; it has no refresh token and is re-minted instead.
+  source?: 'direct' | 'agency';
+};
+
+// An agency-level (Company) install. Sub-account tokens are minted from it with /oauth/locationToken.
+export type CompanyConnection = {
+  companyId: string;
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scope?: string;
+  userId?: string;
+  locationIds: string[];
+  mintErrors: Record<string, string>;
+  updatedAt: string;
+  lastError?: string | null;
+  refreshFailedAt?: number;
 };
 
 export type Registry = {
   instances: Record<string, InstanceRecord>;
   ghl: Record<string, GhlConnection>;
+  companies: Record<string, CompanyConnection>;
 };
 
 export const REGISTRY_FILE = path.join(DATA_DIR, 'registry.json');
-export const registry: Registry = { instances: {}, ghl: {} };
+export const registry: Registry = { instances: {}, ghl: {}, companies: {} };
 
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -59,6 +77,7 @@ export async function loadRegistry() {
     const parsed = JSON.parse(await fs.readFile(REGISTRY_FILE, 'utf8')) as Partial<Registry>;
     registry.instances = parsed.instances || {};
     registry.ghl = parsed.ghl || {};
+    registry.companies = parsed.companies || {};
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       const backup = `${REGISTRY_FILE}.corrupt-${Date.now()}`;
@@ -67,6 +86,7 @@ export async function loadRegistry() {
     }
     registry.instances = {};
     registry.ghl = {};
+    registry.companies = {};
     await save();
   }
 }

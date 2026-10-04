@@ -1,5 +1,5 @@
 import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, PROVIDER_ID } from './config';
-import { decrypt, encrypt, registry, save, type GhlConnection } from './store';
+import { decrypt, encrypt, registry, save, type CompanyConnection, type GhlConnection } from './store';
 
 // HighLevel rejects or misroutes calls without the per-API version from its OpenAPI spec.
 export const CONTACTS_VERSION = '2021-07-28';
@@ -42,38 +42,44 @@ async function call(token: string, endpoint: string, { method = 'GET', version, 
   }
 }
 
-const refreshes = new Map<string, Promise<string>>();
-const REFRESH_BACKOFF_MS = 10 * 60_000;
+type TokenRecord = Pick<GhlConnection, 'accessToken' | 'refreshToken' | 'expiresAt' | 'scope' | 'userId' | 'lastError' | 'refreshFailedAt' | 'updatedAt'>;
 
-export async function getAccessToken(locationId: string, forceRefresh = false): Promise<string> {
-  const conn = registry.ghl[locationId];
-  if (!conn) throw new GhlNotConnectedError(locationId);
-  const stillValid = conn.expiresAt === undefined || conn.expiresAt > Date.now() + 5 * 60_000;
-  if (!conn.refreshToken || (stillValid && !forceRefresh)) return decrypt(conn.accessToken);
-  // A revoked refresh token would otherwise be retried on every single API call.
-  if (conn.refreshFailedAt && Date.now() - conn.refreshFailedAt < REFRESH_BACKOFF_MS) {
-    throw new Error(`HighLevel token for ${locationId} could not be refreshed (${conn.lastError}). Reconnect GHL from the dashboard.`);
-  }
-  // GHL refresh tokens are single-use, so concurrent callers must share one refresh.
-  let pending = refreshes.get(locationId);
+const inflight = new Map<string, Promise<string>>();
+const REFRESH_BACKOFF_MS = 10 * 60_000;
+const EXPIRY_MARGIN_MS = 5 * 60_000;
+
+function singleFlight(key: string, task: () => Promise<string>) {
+  let pending = inflight.get(key);
   if (!pending) {
-    pending = refreshAccessToken(conn).finally(() => refreshes.delete(locationId));
-    refreshes.set(locationId, pending);
+    pending = task().finally(() => inflight.delete(key));
+    inflight.set(key, pending);
   }
   return pending;
 }
 
-async function refreshAccessToken(conn: GhlConnection): Promise<string> {
+const isFresh = (record: { expiresAt?: number }) => record.expiresAt === undefined || record.expiresAt > Date.now() + EXPIRY_MARGIN_MS;
+
+async function refreshableToken(label: string, record: TokenRecord, userType: 'Location' | 'Company', forceRefresh: boolean) {
+  if (!record.refreshToken || (isFresh(record) && !forceRefresh)) return decrypt(record.accessToken);
+  // A revoked refresh token would otherwise be retried on every single API call.
+  if (record.refreshFailedAt && Date.now() - record.refreshFailedAt < REFRESH_BACKOFF_MS) {
+    throw new Error(`HighLevel token for ${label} could not be refreshed (${record.lastError}). Reconnect GHL from the dashboard.`);
+  }
+  // GHL refresh tokens are single-use, so concurrent callers must share one refresh.
+  return singleFlight(`refresh:${label}`, () => refreshRecord(record, userType));
+}
+
+async function refreshRecord(record: TokenRecord, userType: 'Location' | 'Company'): Promise<string> {
   if (!GHL_CLIENT_ID || !GHL_CLIENT_SECRET) {
     throw new Error('GHL_CLIENT_ID / GHL_CLIENT_SECRET are not set on the worker, so the HighLevel token cannot be refreshed.');
   }
+  // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
   const form = new URLSearchParams({
     client_id: GHL_CLIENT_ID,
     client_secret: GHL_CLIENT_SECRET,
     grant_type: 'refresh_token',
-    refresh_token: decrypt(conn.refreshToken!),
-    // redirect_uri is optional for refreshes; omitting it avoids failures when GHL_REDIRECT_URI is stale.
-    user_type: conn.userType === 'Company' ? 'Company' : 'Location'
+    refresh_token: decrypt(record.refreshToken!),
+    user_type: userType
   });
   const res = await fetch(`${GHL_BASE}/oauth/token`, {
     method: 'POST',
@@ -83,23 +89,151 @@ async function refreshAccessToken(conn: GhlConnection): Promise<string> {
   });
   const text = await res.text();
   if (!res.ok) {
-    conn.lastError = `token refresh failed with HTTP ${res.status}: ${text.slice(0, 200)}`;
-    conn.refreshFailedAt = Date.now();
+    record.lastError = `token refresh failed with HTTP ${res.status}: ${text.slice(0, 200)}`;
+    record.refreshFailedAt = Date.now();
     await save();
     throw new GhlApiError(`GHL token refresh failed with HTTP ${res.status}`, res.status, text.slice(0, 1000));
   }
   const data = JSON.parse(text);
-  await saveConnection({
-    locationId: conn.locationId,
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token || decrypt(conn.refreshToken!),
-    expiresIn: data.expires_in,
-    scope: data.scope || conn.scope,
-    userId: data.userId || conn.userId,
-    companyId: data.companyId || conn.companyId,
-    userType: data.userType || conn.userType
-  });
+  record.accessToken = encrypt(data.access_token);
+  if (data.refresh_token) record.refreshToken = encrypt(data.refresh_token);
+  record.expiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : undefined;
+  record.scope = data.scope || record.scope;
+  record.userId = data.userId || record.userId;
+  record.lastError = null;
+  record.refreshFailedAt = undefined;
+  record.updatedAt = new Date().toISOString();
+  await save();
   return data.access_token;
+}
+
+// The agency (Company) install that can mint tokens for this location, if any.
+function agencyFor(locationId: string): CompanyConnection | undefined {
+  const linked = registry.ghl[locationId]?.companyId;
+  if (linked && registry.companies[linked]) return registry.companies[linked];
+  const companies = Object.values(registry.companies);
+  return companies.find(c => c.locationIds.includes(locationId)) || (companies.length === 1 ? companies[0] : undefined);
+}
+
+// Agency installs get sub-account tokens from /oauth/locationToken; they carry no refresh token and are re-minted.
+async function mintLocationToken(company: CompanyConnection, locationId: string, retried = false): Promise<string> {
+  const agencyToken = await refreshableToken(`company ${company.companyId}`, company, 'Company', retried);
+  const res = await fetch(`${GHL_BASE}/oauth/locationToken`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${agencyToken}`,
+      Version: CONTACTS_VERSION,
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: new URLSearchParams({ companyId: company.companyId, locationId }),
+    signal: AbortSignal.timeout(30_000)
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    if (res.status === 401 && !retried && !/scope/i.test(text) && company.refreshToken) return mintLocationToken(company, locationId, true);
+    company.mintErrors = { ...company.mintErrors, [locationId]: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+    await save();
+    throw new GhlApiError(`Could not create a sub-account token for ${locationId} from the agency install (HTTP ${res.status})`, res.status, text.slice(0, 1000));
+  }
+  const data = JSON.parse(text);
+  const { [locationId]: _cleared, ...otherErrors } = company.mintErrors || {};
+  company.mintErrors = otherErrors;
+  if (!company.locationIds.includes(locationId)) company.locationIds.push(locationId);
+  registry.ghl[locationId] = {
+    locationId,
+    accessToken: encrypt(data.access_token),
+    expiresAt: Date.now() + Number(data.expires_in || 86399) * 1000,
+    scope: data.scope,
+    userId: data.userId,
+    companyId: company.companyId,
+    userType: 'Location',
+    source: 'agency',
+    updatedAt: new Date().toISOString()
+  };
+  await save();
+  return data.access_token;
+}
+
+// True when a token for this location exists or can be minted from an agency install.
+export function isConnected(locationId: string) {
+  return Boolean(registry.ghl[locationId] || agencyFor(locationId));
+}
+
+export async function getAccessToken(locationId: string, forceRefresh = false): Promise<string> {
+  const conn = registry.ghl[locationId];
+  if (conn && conn.source !== 'agency') {
+    return refreshableToken(locationId, conn, conn.userType === 'Company' ? 'Company' : 'Location', forceRefresh);
+  }
+  const company = agencyFor(locationId);
+  if (!company) {
+    if (conn) return decrypt(conn.accessToken);
+    throw new GhlNotConnectedError(locationId);
+  }
+  if (conn && isFresh(conn) && !forceRefresh) return decrypt(conn.accessToken);
+  return singleFlight(`mint:${locationId}`, () => mintLocationToken(company, locationId));
+}
+
+export async function saveAgencyConnection(input: {
+  companyId: string;
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn?: number | string;
+  scope?: string;
+  userId?: string;
+  locationIds?: string[];
+}) {
+  const previous = registry.companies[input.companyId];
+  registry.companies[input.companyId] = {
+    companyId: input.companyId,
+    accessToken: encrypt(input.accessToken),
+    refreshToken: input.refreshToken ? encrypt(input.refreshToken) : undefined,
+    expiresAt: input.expiresIn ? Date.now() + Number(input.expiresIn) * 1000 : undefined,
+    scope: input.scope,
+    userId: input.userId,
+    locationIds: [...new Set([...(previous?.locationIds || []), ...(input.locationIds || [])])],
+    mintErrors: {},
+    updatedAt: new Date().toISOString()
+  };
+  // Tokens minted from the previous agency token may lack newly granted scopes; mint fresh ones on demand.
+  for (const [locationId, conn] of Object.entries(registry.ghl)) {
+    if (conn.source === 'agency' && conn.companyId === input.companyId) delete registry.ghl[locationId];
+  }
+  await save();
+}
+
+// Older callbacks stored agency tokens under a location id. Move them to the agency slot so sub-account tokens get minted.
+export async function migrateAgencyTokens(): Promise<string[]> {
+  const moved: string[] = [];
+  for (const [locationId, conn] of Object.entries(registry.ghl)) {
+    if (conn.source === 'agency') continue;
+    const claims = tokenClaims(locationId);
+    if (claims?.authClass !== 'Company' || !claims.authClassId) continue;
+    const companyId = claims.authClassId;
+    const existing = registry.companies[companyId];
+    const keepExisting = existing && existing.updatedAt >= conn.updatedAt;
+    registry.companies[companyId] = {
+      ...(keepExisting
+        ? existing
+        : {
+            companyId,
+            accessToken: conn.accessToken,
+            refreshToken: conn.refreshToken,
+            expiresAt: conn.expiresAt,
+            scope: conn.scope,
+            userId: conn.userId,
+            updatedAt: conn.updatedAt,
+            lastError: conn.lastError,
+            refreshFailedAt: conn.refreshFailedAt,
+            mintErrors: existing?.mintErrors || {}
+          }),
+      locationIds: [...new Set([...(existing?.locationIds || []), locationId])]
+    } as CompanyConnection;
+    delete registry.ghl[locationId];
+    moved.push(companyId);
+  }
+  if (moved.length) await save();
+  return moved;
 }
 
 export async function saveConnection(input: {
@@ -121,6 +255,7 @@ export async function saveConnection(input: {
     userId: input.userId,
     companyId: input.companyId,
     userType: input.userType,
+    source: 'direct',
     updatedAt: new Date().toISOString()
   };
   await save();
@@ -132,7 +267,9 @@ export async function ghlRequest(locationId: string, endpoint: string, options: 
     return await call(token, endpoint, options);
   } catch (err) {
     // A 401 can mean the token expired early (refresh helps) or a missing scope (it does not).
-    const retryable = err instanceof GhlApiError && err.status === 401 && !/scope/i.test(err.body) && registry.ghl[locationId]?.refreshToken;
+    const conn = registry.ghl[locationId];
+    const renewable = Boolean(conn?.refreshToken) || conn?.source === 'agency';
+    const retryable = err instanceof GhlApiError && err.status === 401 && !/scope/i.test(err.body) && renewable;
     if (!retryable) throw err;
     let fresh: string;
     try {
@@ -269,11 +406,9 @@ export function missingScopes(scope: string | null | undefined) {
 
 // HighLevel access tokens are JWTs; their claims say whether this is an agency (Company) or sub-account (Location)
 // token. Only these two claims are surfaced, never the token.
-export function tokenClaims(locationId: string): { authClass?: string; authClassId?: string } | null {
-  const conn = registry.ghl[locationId];
-  if (!conn) return null;
+export function claimsOf(token: string): { authClass?: string; authClassId?: string } | null {
   try {
-    const payload = decrypt(conn.accessToken).split('.')[1];
+    const payload = token.split('.')[1];
     if (!payload) return null;
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     return { authClass: claims.authClass, authClassId: claims.authClassId };
@@ -282,9 +417,32 @@ export function tokenClaims(locationId: string): { authClass?: string; authClass
   }
 }
 
-export function connectionProblem(locationId: string): string | null {
+export function tokenClaims(locationId: string) {
   const conn = registry.ghl[locationId];
   if (!conn) return null;
+  try {
+    return claimsOf(decrypt(conn.accessToken));
+  } catch {
+    return null;
+  }
+}
+
+function agencyProblem(company: CompanyConnection, locationId: string) {
+  const mintError = company.mintErrors?.[locationId];
+  const canMint = (company.scope || '').split(/\s+/).includes('oauth.write');
+  if (!mintError && canMint) return company.lastError || null;
+  const reason = mintError
+    ? `HighLevel refused to create a sub-account token for ${locationId} (${mintError})`
+    : 'its token lacks the oauth.write scope needed to create sub-account tokens';
+  return `the app is installed at the agency level and ${reason}. Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
+}
+
+export function connectionProblem(locationId: string): string | null {
+  const conn = registry.ghl[locationId];
+  if (!conn) {
+    const company = agencyFor(locationId);
+    return company ? agencyProblem(company, locationId) : `HighLevel is not connected for location ${locationId}. Click "Connect GHL" and install the app.`;
+  }
   const claims = tokenClaims(locationId);
   if (claims?.authClass === 'Company') {
     return `the stored token is an agency (Company) token, but conversations need a sub-account token. Set the Marketplace app's target user to Sub-account, then click "Connect GHL" and install it into location ${locationId}.`;

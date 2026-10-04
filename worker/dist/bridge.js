@@ -372,7 +372,7 @@ async function syncToGhl(instanceId, sock, msg, content) {
         (0, events_1.recordEvent)('warn', `Skipped a WhatsApp ${direction} message: WhatsApp hid the contact's number behind a private id (LID) and it could not be mapped yet`, context);
         return;
     }
-    if (!store_1.registry.ghl[locationId]) {
+    if (!ghl.isConnected(locationId)) {
         (0, events_1.recordEvent)('warn', `WhatsApp message ${direction === 'inbound' ? 'from' : 'to'} ${(0, events_1.maskPhone)(phone)} was not synced: location ${locationId} is not connected to HighLevel yet`, context);
         return;
     }
@@ -550,7 +550,7 @@ async function deliverToWhatsApp(payload) {
     const context = { locationId };
     const fail = async (reason, detail) => {
         (0, events_1.recordEvent)('error', `HighLevel message not delivered to WhatsApp: ${reason}`, { ...context, detail });
-        if (!payload.messageId || !store_1.registry.ghl[locationId])
+        if (!payload.messageId || !ghl.isConnected(locationId))
             return;
         await ghl.updateMessageStatus(locationId, payload.messageId, 'failed', reason).catch(err => (0, events_1.recordEvent)('warn', 'Could not mark the HighLevel message as failed', { ...context, detail: (0, events_1.errorText)(err) }));
     };
