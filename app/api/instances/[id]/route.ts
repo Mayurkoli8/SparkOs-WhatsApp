@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { isAdminRequest, signInRequired } from '@/lib/admin-auth';
 import { workerFetch } from '@/lib/worker';
 
 type C = { params: Promise<{ id: string }> };
@@ -12,19 +13,29 @@ async function proxy(path: string, init?: RequestInit) {
   }
 }
 
-export async function GET(_req: Request, { params }: C) {
+export async function GET(req: Request, { params }: C) {
+  if (!isAdminRequest(req)) return signInRequired();
   const { id } = await params;
   return proxy(`/instances/${encodeURIComponent(id)}`);
 }
 
 // Body { fresh: true } discards the stored WhatsApp login and shows a new QR code.
 export async function POST(req: Request, { params }: C) {
+  if (!isAdminRequest(req)) return signInRequired();
   const { id } = await params;
   const body = (await req.text()) || '{}';
   return proxy(`/instances/${encodeURIComponent(id)}/restart`, { method: 'POST', body });
 }
 
-export async function DELETE(_req: Request, { params }: C) {
+// Body { name } renames the number; { isDefault: true } makes it the sub-account's default sender.
+export async function PATCH(req: Request, { params }: C) {
+  if (!isAdminRequest(req)) return signInRequired();
+  const { id } = await params;
+  return proxy(`/instances/${encodeURIComponent(id)}`, { method: 'PATCH', body: (await req.text()) || '{}' });
+}
+
+export async function DELETE(req: Request, { params }: C) {
+  if (!isAdminRequest(req)) return signInRequired();
   const { id } = await params;
   return proxy(`/instances/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

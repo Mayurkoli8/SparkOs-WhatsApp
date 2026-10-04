@@ -7,17 +7,33 @@ import makeWASocket, {
   downloadMediaMessage,
   jidDecode,
   useMultiFileAuthState,
+  WAMessageStatus,
   type AnyMessageContent,
   type AuthenticationCreds,
   type ConnectionState,
   type proto,
+  type ReachoutTimelockState,
   type WAMessage,
+  type WAMessageKey,
   type WAMessageUpdate,
   type WASocket
 } from '@whiskeysockets/baileys';
-import { DATA_DIR, MAX_MEDIA_BYTES, SEND_INTERVAL_MS, SYNC_PHONE_MESSAGES } from './config';
+import {
+  COLD_MESSAGES_PER_CONTACT,
+  DATA_DIR,
+  FAILOVER_WAIT_MS,
+  MAX_MEDIA_BYTES,
+  NEW_CHATS_PER_DAY,
+  SEND_INTERVAL_MS,
+  SYNC_PHONE_MESSAGES,
+  WARMUP_DAYS,
+  WARMUP_NEW_CHATS_PER_DAY
+} from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
 import * as ghl from './ghl';
+import { numbersOf, promoteDefault } from './numbers';
+import { ProtectionBook, typingDelayMs, type NumberState } from './protection';
+import { parseRouteToken, routeCandidates, type RouteNumber } from './routing';
 import { downloadPublicFile } from './safe-fetch';
 import { registry, save, type InstanceRecord } from './store';
 import {
@@ -71,11 +87,53 @@ const mirrorDisabled = new Set<string>();
 const chatQueues = new Map<string, Promise<void>>();
 const sendQueues = new Map<string, Promise<void>>();
 
+// Number id + contact phone -> the contact's messages we have not marked as read yet (read before replying, like a person).
+const unread = new BoundedMap<string, WAMessageKey[]>(5000);
+// Location + contact id -> the number their "wa:" tag points at, so the tag is only rewritten when it changes.
+const tagCache = new BoundedMap<string, { phone: string; at: number }>(5000);
+
 const CONTACT_CACHE_MS = 6 * 3600_000;
+const TAG_CACHE_MS = 15 * 60_000;
 const OFFLINE_WINDOW_MS = 48 * 3600_000;
 const ECHO_WINDOW_MS = 2 * 60_000;
+const RESTRICTION_FALLBACK_MS = 24 * 3600_000;
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+export const protection = new ProtectionBook({
+  newChatsPerDay: NEW_CHATS_PER_DAY,
+  warmupDays: WARMUP_DAYS,
+  warmupNewChatsPerDay: WARMUP_NEW_CHATS_PER_DAY,
+  coldMessagesPerContact: COLD_MESSAGES_PER_CONTACT
+});
+const PROTECTION_FILE = path.join(DATA_DIR, 'protection.json');
+let protectionTimer: NodeJS.Timeout | null = null;
+
+export async function loadProtection() {
+  try {
+    protection.load(JSON.parse(await fs.readFile(PROTECTION_FILE, 'utf8')));
+  } catch {
+    // first run
+  }
+}
+
+export async function flushProtection() {
+  if (protectionTimer) clearTimeout(protectionTimer);
+  protectionTimer = null;
+  protection.prune(Date.now());
+  const tmp = `${PROTECTION_FILE}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(protection.toJSON()), 'utf8').then(() => fs.rename(tmp, PROTECTION_FILE)).catch(() => undefined);
+}
+
+function saveProtectionSoon() {
+  if (protectionTimer) return;
+  protectionTimer = setTimeout(() => void flushProtection(), 5000);
+  protectionTimer.unref?.();
+}
+
+export function numberState(instance: InstanceRecord): NumberState {
+  return { linkedAt: instance.linkedAt ? Date.parse(instance.linkedAt) : null, restrictedUntil: instance.restrictedUntil ?? null };
+}
 
 export function authDir(id: string) {
   return path.join(DATA_DIR, 'auth', id);
@@ -170,8 +228,38 @@ async function openSession(id: string, fresh: boolean) {
     for (const message of messages) queueIncoming(id, sock, message, type);
   });
   sock.ev.on('messages.update', updates => {
-    if (isCurrent()) void syncReceipts(updates);
+    if (isCurrent()) void syncReceipts(id, updates);
   });
+}
+
+// WhatsApp's "reach-out timelock": the number may keep existing chats but cannot start new ones until it ends.
+function applyRestriction(id: string, lock: ReachoutTimelockState | undefined) {
+  const meta = registry.instances[id];
+  if (!meta || !lock) return;
+  const until = lock.isActive ? (lock.timeEnforcementEnds ? new Date(lock.timeEnforcementEnds).getTime() : Date.now() + RESTRICTION_FALLBACK_MS) : null;
+  const wasRestricted = Boolean(meta.restrictedUntil && meta.restrictedUntil > Date.now());
+  if (!until && !wasRestricted) return;
+  updateInstance(id, { restrictedUntil: until });
+  if (until) {
+    recordEvent('error', `WhatsApp restricted ${maskPhone(meta.phone)} (#${meta.slot}) from starting new chats until ${new Date(until).toISOString()}`, {
+      instanceId: id,
+      locationId: meta.locationId,
+      detail: `reason: ${lock.enforcementType || 'not given'}. Existing chats keep working; new chats from this number are paused and are not moved to other numbers.`
+    });
+  } else {
+    recordEvent('info', `WhatsApp lifted the restriction on ${maskPhone(meta.phone)} (#${meta.slot})`, { instanceId: id, locationId: meta.locationId });
+  }
+}
+
+// A 463 error ack means WhatsApp refused a message because the number may not start new chats right now.
+function markRestrictedFromError(id: string) {
+  const meta = registry.instances[id];
+  if (!meta || (meta.restrictedUntil && meta.restrictedUntil > Date.now())) return;
+  applyRestriction(id, { isActive: true, timeEnforcementEnds: new Date(Date.now() + RESTRICTION_FALLBACK_MS) });
+  sessions.get(id)?.sock
+    .fetchAccountReachoutTimelock()
+    .then(lock => lock.isActive && applyRestriction(id, lock))
+    .catch(() => undefined);
 }
 
 async function handleConnectionUpdate(id: string, session: Session, update: Partial<ConnectionState>) {
@@ -184,12 +272,19 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
     if (sessions.get(id) === session) updateInstance(id, { status: 'qr', qr: dataUrl, lastError: null });
   }
 
+  if (update.reachoutTimeLock) applyRestriction(id, update.reachoutTimeLock);
+
   if (update.connection === 'open') {
     reconnectAttempts.delete(id);
     replacedCount.delete(id);
     const phone = jidDecode(session.sock.user?.id)?.user;
-    updateInstance(id, { status: 'connected', phone, qr: null, lastError: null });
+    updateInstance(id, { status: 'connected', phone, qr: null, lastError: null, linkedAt: meta.linkedAt || new Date().toISOString() });
     recordEvent('info', `WhatsApp connected as ${maskPhone(phone)}`, context);
+    // Learn whether WhatsApp currently limits this number before anything is sent from it.
+    session.sock
+      .fetchAccountReachoutTimelock()
+      .then(lock => applyRestriction(id, lock))
+      .catch(err => log.debug({ err, id }, 'reachout timelock check failed'));
   }
 
   if (update.connection !== 'close') return;
@@ -209,8 +304,13 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
     return;
   }
   if (code === DisconnectReason.forbidden || code === DisconnectReason.multideviceMismatch) {
-    updateInstance(id, { status: 'error', qr: null, lastError: `WhatsApp refused the connection (${code}): ${reason}` });
-    recordEvent('error', `WhatsApp refused the connection (${code})`, { ...context, detail: reason });
+    const banned = code === DisconnectReason.forbidden;
+    updateInstance(id, {
+      status: 'error',
+      qr: null,
+      lastError: banned ? 'WhatsApp blocked this number (403). Check the WhatsApp app on the phone for a ban or review notice.' : `WhatsApp refused the connection (${code}): ${reason}`
+    });
+    recordEvent('error', banned ? `WhatsApp blocked ${maskPhone(meta.phone)} (403)` : `WhatsApp refused the connection (${code})`, { ...context, detail: reason });
     return;
   }
   if (!paired && code === DisconnectReason.timedOut) {
@@ -281,7 +381,11 @@ export async function deleteInstance(id: string) {
       }
     }
     await fs.rm(authDir(id), { recursive: true, force: true });
+    const locationId = registry.instances[id]?.locationId;
     delete registry.instances[id];
+    if (locationId) promoteDefault(locationId);
+    protection.forget(id);
+    saveProtectionSoon();
     await save();
   });
 }
@@ -357,6 +461,14 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
     recordEvent('warn', `Skipped a WhatsApp ${direction} message: WhatsApp hid the contact's number behind a private id (LID) and it could not be mapped yet`, context);
     return;
   }
+  // Someone who wrote to this number can always be answered from it; a chat typed on the phone counts as a send.
+  if (direction === 'inbound') {
+    protection.markInbound(instanceId, phone, Date.now());
+    rememberUnread(instanceId, phone, msg.key);
+  } else {
+    protection.recordSend(instanceId, phone, Date.now());
+  }
+  saveProtectionSoon();
   if (!ghl.isConnected(locationId)) {
     recordEvent('warn', `WhatsApp message ${direction === 'inbound' ? 'from' : 'to'} ${maskPhone(phone)} was not synced: location ${locationId} is not connected to HighLevel yet`, context);
     return;
@@ -365,6 +477,7 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
 
   const displayName = direction === 'inbound' ? msg.pushName || undefined : undefined;
   let target = await resolveContact(locationId, phone, displayName);
+  void ensureWaTag(locationId, target.contactId, meta.phone);
   let message = content.text;
   let attachments: string[] = [];
   if (content.media) {
@@ -404,6 +517,34 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
   if (result.messageId) mirroredGhlIds.set(result.messageId, true);
   recordEvent('info', `Mirrored a message typed on the phone to ${maskPhone(phone)} into HighLevel`, context);
   void verifyMirrorDirection(locationId, result.messageId);
+}
+
+function rememberUnread(instanceId: string, phone: string, key: WAMessageKey) {
+  const id = `${instanceId}|${phone}`;
+  unread.set(id, [...(unread.get(id) ?? []), key].slice(-20));
+}
+
+// Read the contact's waiting messages before answering them, as a person would.
+async function markRead(instanceId: string, sock: WASocket, phone: string) {
+  const id = `${instanceId}|${phone}`;
+  const keys = unread.get(id);
+  if (!keys?.length) return;
+  unread.delete(id);
+  await sock.readMessages(keys).catch(err => log.debug({ err }, 'marking messages read failed'));
+}
+
+// The contact's "wa: +number" tag follows the number they last wrote to; replies are routed by it.
+async function ensureWaTag(locationId: string, contactId: string, numberPhone: string | undefined) {
+  if (!numberPhone) return;
+  const cacheKey = `${locationId}|${contactId}`;
+  const hit = tagCache.get(cacheKey);
+  if (hit && hit.phone === numberPhone && Date.now() - hit.at < TAG_CACHE_MS) return;
+  try {
+    await ghl.setContactWaTag(locationId, contactId, numberPhone);
+    tagCache.set(cacheKey, { phone: numberPhone, at: Date.now() });
+  } catch (err) {
+    recordEvent('warn', "Could not update the contact's WhatsApp number tag", { locationId, detail: errorText(err) });
+  }
 }
 
 // Phone-typed messages are recorded through the inbound endpoint with direction "outbound". Check once per location
@@ -452,15 +593,20 @@ async function uploadMedia(sock: WASocket, msg: WAMessage, content: ExtractedCon
   return urls;
 }
 
-async function syncReceipts(updates: WAMessageUpdate[]) {
+async function syncReceipts(instanceId: string, updates: WAMessageUpdate[]) {
   for (const { key, update } of updates) {
+    // An error ack carrying 463 means WhatsApp refused the message: the number may not start new chats right now.
+    const restricted =
+      update.status === WAMessageStatus.ERROR && (update.messageStubParameters as unknown[] | null | undefined ?? []).some((p: unknown) => String(p) === '463' || /restrict/i.test(String(p)));
+    if (key.fromMe && restricted) markRestrictedFromError(instanceId);
     const delivery = key.id ? deliveries.get(key.id) : undefined;
     if (!delivery) continue;
     const status = ghlStatusFromWa(update.status);
     if (!status || !shouldAdvanceStatus(delivery.status, status)) continue;
     delivery.status = status;
+    const reason = status === 'failed' ? (restricted ? 'WhatsApp is not letting this number start new chats right now.' : 'WhatsApp rejected the message.') : undefined;
     try {
-      await ghl.updateMessageStatus(delivery.locationId, delivery.ghlMessageId, status);
+      await ghl.updateMessageStatus(delivery.locationId, delivery.ghlMessageId, status, reason);
     } catch (err) {
       recordEvent('warn', `Could not set the HighLevel message status to ${status}`, { locationId: delivery.locationId, detail: errorText(err) });
     }
@@ -477,15 +623,22 @@ export type ProviderOutboundPayload = {
   type?: string;
 };
 
-function pickInstance(locationId: string) {
-  const candidates = Object.values(registry.instances).filter(i => i.locationId === locationId);
-  return candidates.find(i => isLive(i.id)) || candidates[0];
+const toRouteNumber = (i: InstanceRecord): RouteNumber => ({ id: i.id, slot: i.slot ?? 0, name: i.name, phone: i.phone, isDefault: Boolean(i.isDefault) });
+
+async function waitUntilLive(id: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isLive(id)) return true;
+    if (!registry.instances[id]) return false;
+    await delay(2000);
+  }
+  return isLive(id);
 }
 
-// Sends are spaced out per number; bulk sends from workflows are queued instead of fired at once.
+// Sends from one number are spaced out by a random gap; bursts are queued instead of fired at once.
 function enqueueSend(instanceId: string, task: () => Promise<void>) {
   const run = (sendQueues.get(instanceId) ?? Promise.resolve()).then(task);
-  const gap = run.catch(() => undefined).then(() => delay(SEND_INTERVAL_MS));
+  const gap = run.catch(() => undefined).then(() => delay(SEND_INTERVAL_MS + Math.random() * SEND_INTERVAL_MS * 1.5));
   sendQueues.set(instanceId, gap);
   void gap.finally(() => sendQueues.get(instanceId) === gap && sendQueues.delete(instanceId));
   return run;
@@ -532,6 +685,33 @@ async function sendTracked(sock: WASocket, jid: string, content: AnyMessageConte
   if (delivery) deliveries.set(id, delivery);
 }
 
+// Show "typing…" for a human-sized moment before sending, as WhatsApp Web does when a person types.
+async function humanSend(sock: WASocket, jid: string, content: AnyMessageContent, typedText: string, delivery: Delivery | null) {
+  try {
+    await sock.sendPresenceUpdate('available');
+    await sock.sendPresenceUpdate('composing', jid);
+    await delay(typingDelayMs(typedText));
+    await sock.sendPresenceUpdate('paused', jid);
+  } catch (err) {
+    log.debug({ err }, 'presence update failed');
+  }
+  await sendTracked(sock, jid, content, delivery);
+}
+
+// Send a batch to one contact from one number: read their waiting messages, type and send, then go offline again
+// (staying "online" would stop notifications on the phone).
+function sendFromNumber(instanceId: string, sock: WASocket, jid: string, digits: string, parts: { text: string; attachments: string[] }, delivery: Delivery | null) {
+  return enqueueSend(instanceId, async () => {
+    await markRead(instanceId, sock, digits);
+    try {
+      if (parts.text) await humanSend(sock, jid, { text: parts.text }, parts.text, delivery);
+      for (const url of parts.attachments) await humanSend(sock, jid, await attachmentContent(url), '', delivery);
+    } finally {
+      sock.sendPresenceUpdate('unavailable').catch(() => undefined);
+    }
+  });
+}
+
 let providerVerified = false;
 
 export function handleProviderOutbound(payload: ProviderOutboundPayload) {
@@ -567,7 +747,7 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
     phone = (await ghl.getContactPhone(locationId, payload.contactId).catch(() => null)) || '';
   }
   const digits = phone.replace(/\D/g, '');
-  const text = (payload.message || '').trim();
+  const { token, text } = parseRouteToken((payload.message || '').trim());
   const attachments = (Array.isArray(payload.attachments) ? payload.attachments : []).filter(
     (u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u)
   );
@@ -576,20 +756,39 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
 
   if (!digits) return fail('the contact has no phone number');
   if (!text && !attachments.length) return fail('the message is empty');
-  const instance = pickInstance(locationId);
-  if (!instance) return fail('no WhatsApp number is linked to this sub-account yet. Create an instance on the bridge dashboard and scan the QR code.');
-  const session = sessions.get(instance.id);
-  if (!session || !isLive(instance.id)) return fail(`WhatsApp is not connected (status: ${instance.status}). Reconnect it on the bridge dashboard.`);
+  const numbers = numbersOf(locationId);
+  if (!numbers.length) return fail('no WhatsApp number is linked to this sub-account yet. Connect one on the sub-account page.');
+
+  // Token in the message, else the contact's "wa:" tag, else the default number; then the others as backups.
+  const taggedPhone =
+    token || !payload.contactId || !ghl.isConnected(locationId) ? null : await ghl.getContactWaTag(locationId, payload.contactId).catch(() => null);
+  let candidates: RouteNumber[];
+  try {
+    candidates = routeCandidates(numbers.map(toRouteNumber), { token, taggedPhone });
+  } catch (err) {
+    return fail(errorText(err));
+  }
+  const preferred = candidates[0];
+  const chosen = isLive(preferred.id) || (await waitUntilLive(preferred.id, FAILOVER_WAIT_MS)) ? preferred : candidates.slice(1).find(c => isLive(c.id));
+  const session = chosen && sessions.get(chosen.id);
+  if (!chosen || !session) return fail("none of this sub-account's WhatsApp numbers is connected. Reconnect them on the sub-account page.");
 
   const jid = await whatsappJid(session.sock, digits);
   if (!jid) return fail(`${maskPhone(digits)} is not registered on WhatsApp`);
+  // Reaching out to people who never wrote to this number is limited; the slot is reserved before queueing.
+  const decision = protection.check(chosen.id, digits, numberState(registry.instances[chosen.id]), Date.now());
+  if (!decision.allowed) return fail(`number #${chosen.slot} (${maskPhone(chosen.phone)}): ${decision.reason}`);
+  protection.recordSend(chosen.id, digits, Date.now());
+  saveProtectionSoon();
+
   const delivery: Delivery | null = payload.messageId ? { locationId, ghlMessageId: payload.messageId } : null;
   try {
-    await enqueueSend(instance.id, async () => {
-      if (text) await sendTracked(session.sock, jid, { text }, delivery);
-      for (const url of attachments) await sendTracked(session.sock, jid, await attachmentContent(url), delivery);
+    await sendFromNumber(chosen.id, session.sock, jid, digits, { text, attachments }, delivery);
+    const via = chosen === preferred ? '' : ` as a backup for #${preferred.slot}, which is offline`;
+    recordEvent('info', `Delivered a HighLevel message to ${maskPhone(digits)} from #${chosen.slot} ${chosen.name}${via}`, {
+      ...context,
+      instanceId: chosen.id
     });
-    recordEvent('info', `Delivered a HighLevel message to WhatsApp ${maskPhone(digits)}`, { ...context, instanceId: instance.id, detail: `provider message type: ${payload.type || 'not given'}` });
   } catch (err) {
     await fail('WhatsApp rejected the send', errorText(err));
   }
@@ -597,15 +796,14 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
 
 export async function sendDirect(instanceId: string, to: string, text: string) {
   const session = sessions.get(instanceId);
-  if (!session || !isLive(instanceId)) throw new Error('Instance is not connected');
+  const instance = registry.instances[instanceId];
+  if (!session || !instance || !isLive(instanceId)) throw new Error('Instance is not connected');
   const digits = to.replace(/\D/g, '');
   const jid = await whatsappJid(session.sock, digits);
   if (!jid) throw new Error(`${maskPhone(digits)} is not registered on WhatsApp`);
-  let id: string | null = null;
-  await enqueueSend(instanceId, async () => {
-    const sent = await session.sock.sendMessage(jid, { text });
-    id = sent?.key.id || null;
-    if (id && sent?.message) sentMessages.set(id, sent.message);
-  });
-  return id;
+  const decision = protection.check(instanceId, digits, numberState(instance), Date.now());
+  if (!decision.allowed) throw new Error(decision.reason);
+  protection.recordSend(instanceId, digits, Date.now());
+  saveProtectionSoon();
+  await sendFromNumber(instanceId, session.sock, jid, digits, { text, attachments: [] }, null);
 }

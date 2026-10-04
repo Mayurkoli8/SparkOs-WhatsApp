@@ -1,5 +1,6 @@
 import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, INTERNAL_API_KEY, PROVIDER_ID, TOKEN_REFRESH_URL } from './config';
 import { recordEvent } from './events';
+import { formatWaTag, isWaTag, parseWaTag } from './routing';
 import { decrypt, encrypt, registry, save, type CompanyConnection, type GhlConnection } from './store';
 
 // HighLevel rejects or misroutes calls without the per-API version from its OpenAPI spec.
@@ -493,6 +494,28 @@ export async function learnProviderFromMessage(locationId: string, messageId: st
     });
   }
   return providerId;
+}
+
+export async function getContactTags(locationId: string, contactId: string): Promise<string[]> {
+  const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: CONTACTS_VERSION });
+  return Array.isArray(data.contact?.tags) ? data.contact.tags : [];
+}
+
+// The number a contact talks to, from their "wa: +number" tag (agents may edit it to move the contact).
+export async function getContactWaTag(locationId: string, contactId: string) {
+  return parseWaTag(await getContactTags(locationId, contactId));
+}
+
+// Keep exactly one "wa: +number" tag on the contact: the number they last wrote to.
+export async function setContactWaTag(locationId: string, contactId: string, phoneDigits: string) {
+  const tags = await getContactTags(locationId, contactId);
+  const wanted = formatWaTag(phoneDigits);
+  const stale = tags.filter(t => isWaTag(t) && t.trim().toLowerCase() !== wanted);
+  const path = `/contacts/${encodeURIComponent(contactId)}/tags`;
+  if (stale.length) await ghlRequest(locationId, path, { method: 'DELETE', version: CONTACTS_VERSION, body: { tags: stale } });
+  if (!tags.some(t => t.trim().toLowerCase() === wanted)) {
+    await ghlRequest(locationId, path, { method: 'POST', version: CONTACTS_VERSION, body: { tags: [wanted] } });
+  }
 }
 
 export async function getContactPhone(locationId: string, contactId: string): Promise<string | null> {

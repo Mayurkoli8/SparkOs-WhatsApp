@@ -14,6 +14,9 @@ exports.inboundTypeCandidates = inboundTypeCandidates;
 exports.addInboundMessageDetectingType = addInboundMessageDetectingType;
 exports.effectiveProviderId = effectiveProviderId;
 exports.learnProviderFromMessage = learnProviderFromMessage;
+exports.getContactTags = getContactTags;
+exports.getContactWaTag = getContactWaTag;
+exports.setContactWaTag = setContactWaTag;
 exports.getContactPhone = getContactPhone;
 exports.addInboundMessage = addInboundMessage;
 exports.updateMessageStatus = updateMessageStatus;
@@ -27,6 +30,7 @@ exports.connectionProblem = connectionProblem;
 exports.testConnection = testConnection;
 const config_1 = require("./config");
 const events_1 = require("./events");
+const routing_1 = require("./routing");
 const store_1 = require("./store");
 // HighLevel rejects or misroutes calls without the per-API version from its OpenAPI spec.
 exports.CONTACTS_VERSION = '2021-07-28';
@@ -497,6 +501,26 @@ async function learnProviderFromMessage(locationId, messageId) {
         });
     }
     return providerId;
+}
+async function getContactTags(locationId, contactId) {
+    const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: exports.CONTACTS_VERSION });
+    return Array.isArray(data.contact?.tags) ? data.contact.tags : [];
+}
+// The number a contact talks to, from their "wa: +number" tag (agents may edit it to move the contact).
+async function getContactWaTag(locationId, contactId) {
+    return (0, routing_1.parseWaTag)(await getContactTags(locationId, contactId));
+}
+// Keep exactly one "wa: +number" tag on the contact: the number they last wrote to.
+async function setContactWaTag(locationId, contactId, phoneDigits) {
+    const tags = await getContactTags(locationId, contactId);
+    const wanted = (0, routing_1.formatWaTag)(phoneDigits);
+    const stale = tags.filter(t => (0, routing_1.isWaTag)(t) && t.trim().toLowerCase() !== wanted);
+    const path = `/contacts/${encodeURIComponent(contactId)}/tags`;
+    if (stale.length)
+        await ghlRequest(locationId, path, { method: 'DELETE', version: exports.CONTACTS_VERSION, body: { tags: stale } });
+    if (!tags.some(t => t.trim().toLowerCase() === wanted)) {
+        await ghlRequest(locationId, path, { method: 'POST', version: exports.CONTACTS_VERSION, body: { tags: [wanted] } });
+    }
 }
 async function getContactPhone(locationId, contactId) {
     const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: exports.CONTACTS_VERSION });

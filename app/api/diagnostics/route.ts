@@ -1,3 +1,4 @@
+import { isAdminRequest, signInRequired } from '@/lib/admin-auth';
 import { NextRequest, NextResponse } from 'next/server';
 import { workerFetch } from '@/lib/worker';
 
@@ -8,6 +9,7 @@ type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
 const REQUIRED_ENV = ['WORKER_URL', 'WORKER_API_KEY', 'GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'GHL_INSTALL_URL'];
 
 export async function GET(req: NextRequest) {
+  if (!isAdminRequest(req)) return signInRequired();
   const origin = new URL(req.url).origin;
   const callbackUrl = `${origin}/api/oauth/callback`;
   const deliveryUrl = `${origin}/api/oauth/outbound`;

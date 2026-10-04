@@ -104,6 +104,15 @@ In HighLevel Developer Marketplace:
 7. When the instance becomes Connected, inbound messages should be forwarded to HighLevel.
 8. Outbound messages from the configured custom provider in HighLevel are forwarded to the worker and then to WhatsApp. Delivered/read receipts update the message status in HighLevel; failures are marked failed with the reason.
 
+## Admin, sub-accounts and multiple numbers
+
+- `/admin` (password: Vercel `ADMIN_PASSWORD`) shows every sub-account, number, health check and the activity log.
+- `/subaccount/<locationId>` is the sub-account's own page; add it in the agency as a Custom Menu Link `https://<vercel-domain>/subaccount/{{location.id}}`. Sub-accounts add, name, reconnect and remove their numbers there, up to the limit set in admin (default 5).
+- Routing: a `{WA#2}` / `{WA:Sales}` / `{WA:+91…}` token in a message, else the contact's `wa: +number` tag (kept on the number they last wrote to), else the default number. If that number is offline the message waits up to 60 s, then goes from another connected number.
+- Number protection (worker env, per number): `NEW_CHATS_PER_DAY` (30) new conversations with people who never wrote, `WARMUP_DAYS` (7) / `WARMUP_NEW_CHATS_PER_DAY` (10) for newly linked numbers, `COLD_MESSAGES_PER_CONTACT` (3) unanswered messages, `FAILOVER_WAIT_SECONDS` (60). People who wrote first can always be answered. When WhatsApp restricts a number (error 463 / reach-out timelock) it stops starting new chats until the restriction ends, and that outreach is not moved to other numbers. Sends use a typing indicator, human-like pauses, and read receipts.
+
+These limits lower the risk of Meta restrictions; no WhatsApp Web based bridge can rule them out. Only Meta's official WhatsApp Business Platform is free of that risk.
+
 ## Troubleshooting
 
 The dashboard's **Setup status** panel checks the configuration on both Vercel and the worker (API key, provider ID, OAuth client, persistent storage, signature verification, HighLevel connection, WhatsApp connection). The **Activity** panel lists every sync attempt and the exact HighLevel error when one fails. `GET /api/health` shows which worker build is running.

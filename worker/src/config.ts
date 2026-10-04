@@ -27,5 +27,16 @@ export const SYNC_PHONE_MESSAGES = env.SYNC_PHONE_MESSAGES !== 'false';
 export const SEND_INTERVAL_MS = Number(env.SEND_MIN_INTERVAL_MS || 1200);
 export const MAX_MEDIA_BYTES = Number(env.MAX_MEDIA_MB || 16) * 1024 * 1024;
 
+// Unset or empty keeps the default; an explicit 0 is honoured.
+const num = (value: string | undefined, fallback: number) => (value === undefined || value.trim() === '' ? fallback : Number(value));
+
+// Number protection: limits on reaching out to people who never wrote to a number (see protection.ts).
+export const NEW_CHATS_PER_DAY = num(env.NEW_CHATS_PER_DAY, 30);
+export const WARMUP_DAYS = num(env.WARMUP_DAYS, 7);
+export const WARMUP_NEW_CHATS_PER_DAY = num(env.WARMUP_NEW_CHATS_PER_DAY, 10);
+export const COLD_MESSAGES_PER_CONTACT = num(env.COLD_MESSAGES_PER_CONTACT, 3);
+// How long a message waits for its number to reconnect before a backup number sends it.
+export const FAILOVER_WAIT_MS = num(env.FAILOVER_WAIT_SECONDS, 60) * 1000;
+
 export const BUILD = '2026-10-04.1';
 export const COMMIT = (env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7);

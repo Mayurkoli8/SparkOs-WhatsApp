@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMIT = exports.BUILD = exports.MAX_MEDIA_BYTES = exports.SEND_INTERVAL_MS = exports.SYNC_PHONE_MESSAGES = exports.GHL_WEBHOOK_PUBLIC_KEY = exports.SIGNATURE_CHECK_DISABLED = exports.TOKEN_REFRESH_URL = exports.GHL_CLIENT_SECRET = exports.GHL_CLIENT_ID = exports.INBOUND_TYPE = exports.PROVIDER_ID = exports.GHL_BASE = exports.INTERNAL_API_KEY = exports.DATA_DIR = exports.DATA_VOLUME = exports.VOLUME_PATH = exports.PORT = void 0;
+exports.COMMIT = exports.BUILD = exports.FAILOVER_WAIT_MS = exports.COLD_MESSAGES_PER_CONTACT = exports.WARMUP_NEW_CHATS_PER_DAY = exports.WARMUP_DAYS = exports.NEW_CHATS_PER_DAY = exports.MAX_MEDIA_BYTES = exports.SEND_INTERVAL_MS = exports.SYNC_PHONE_MESSAGES = exports.GHL_WEBHOOK_PUBLIC_KEY = exports.SIGNATURE_CHECK_DISABLED = exports.TOKEN_REFRESH_URL = exports.GHL_CLIENT_SECRET = exports.GHL_CLIENT_ID = exports.INBOUND_TYPE = exports.PROVIDER_ID = exports.GHL_BASE = exports.INTERNAL_API_KEY = exports.DATA_DIR = exports.DATA_VOLUME = exports.VOLUME_PATH = exports.PORT = void 0;
 const node_path_1 = __importDefault(require("node:path"));
 const env = process.env;
 exports.PORT = Number(env.PORT || 3001);
@@ -28,5 +28,14 @@ exports.SYNC_PHONE_MESSAGES = env.SYNC_PHONE_MESSAGES !== 'false';
 // Minimum gap between WhatsApp sends per instance; bursts from bulk actions get queued instead of fired at once.
 exports.SEND_INTERVAL_MS = Number(env.SEND_MIN_INTERVAL_MS || 1200);
 exports.MAX_MEDIA_BYTES = Number(env.MAX_MEDIA_MB || 16) * 1024 * 1024;
+// Unset or empty keeps the default; an explicit 0 is honoured.
+const num = (value, fallback) => (value === undefined || value.trim() === '' ? fallback : Number(value));
+// Number protection: limits on reaching out to people who never wrote to a number (see protection.ts).
+exports.NEW_CHATS_PER_DAY = num(env.NEW_CHATS_PER_DAY, 30);
+exports.WARMUP_DAYS = num(env.WARMUP_DAYS, 7);
+exports.WARMUP_NEW_CHATS_PER_DAY = num(env.WARMUP_NEW_CHATS_PER_DAY, 10);
+exports.COLD_MESSAGES_PER_CONTACT = num(env.COLD_MESSAGES_PER_CONTACT, 3);
+// How long a message waits for its number to reconnect before a backup number sends it.
+exports.FAILOVER_WAIT_MS = num(env.FAILOVER_WAIT_SECONDS, 60) * 1000;
 exports.BUILD = '2026-10-04.1';
 exports.COMMIT = (env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7);

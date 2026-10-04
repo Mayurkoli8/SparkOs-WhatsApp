@@ -1,8 +1,10 @@
+import { isAdminRequest, signInRequired } from '@/lib/admin-auth';
 import { NextResponse } from 'next/server';
 import { workerFetch } from '@/lib/worker';
 
 // Makes one authenticated HighLevel API call with the stored token for a location.
 export async function POST(req: Request) {
+  if (!isAdminRequest(req)) return signInRequired();
   const { locationId } = await req.json().catch(() => ({ locationId: '' }));
   if (!locationId) return NextResponse.json({ error: 'locationId is required' }, { status: 400 });
   try {

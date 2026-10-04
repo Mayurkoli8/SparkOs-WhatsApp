@@ -43,6 +43,7 @@ const config_1 = require("./config");
 const events_1 = require("./events");
 const ghl = __importStar(require("./ghl"));
 const bridge = __importStar(require("./bridge"));
+const numbers_1 = require("./numbers");
 const store_1 = require("./store");
 const signature_1 = require("./signature");
 const startedAt = new Date().toISOString();
@@ -71,18 +72,27 @@ app.use((req, res, next) => {
     }
     next();
 });
-const publicInstance = ({ id, name, locationId, status, phone, createdAt, updatedAt, qr, lastError }) => ({
-    id,
-    name,
-    locationId,
-    status,
-    phone,
-    createdAt,
-    updatedAt,
-    qr: qr || null,
-    lastError: lastError || null,
-    ghlConnected: ghl.isConnected(locationId)
-});
+const publicInstance = (instance) => {
+    const { id, name, locationId, status, phone, createdAt, updatedAt, qr, lastError, slot, isDefault, linkedAt } = instance;
+    const protection = bridge.protection.stats(id, bridge.numberState(instance), Date.now());
+    return {
+        id,
+        name,
+        locationId,
+        status,
+        phone,
+        createdAt,
+        updatedAt,
+        qr: qr || null,
+        lastError: lastError || null,
+        slot: slot ?? null,
+        isDefault: Boolean(isDefault),
+        linkedAt: linkedAt || null,
+        restrictedUntil: protection.restricted ? instance.restrictedUntil : null,
+        protection,
+        ghlConnected: ghl.isConnected(locationId)
+    };
+};
 function sendError(res, err, status = 500) {
     res.status(status).json({ error: (0, events_1.errorText)(err) });
 }
@@ -102,11 +112,27 @@ app.get('/instances', (_req, res) => res.json({ instances: Object.values(store_1
 app.post('/instances', async (req, res) => {
     try {
         const locationId = String(req.body?.locationId || '').trim();
-        const name = String(req.body?.name || 'WhatsApp Instance').trim() || 'WhatsApp Instance';
         if (!locationId)
             return res.status(400).json({ error: 'locationId is required' });
+        const existing = (0, numbers_1.numbersOf)(locationId);
+        // Sub-account self-service respects the limit; the admin may go beyond it.
+        if (req.body?.enforceLimit === true && existing.length >= (0, numbers_1.limitFor)(locationId)) {
+            return res.status(409).json({ error: `This sub-account already uses all ${(0, numbers_1.limitFor)(locationId)} of its WhatsApp numbers.` });
+        }
+        const slot = (0, numbers_1.claimSlot)(locationId);
+        const name = String(req.body?.name || '').trim().slice(0, 40) || `Number ${slot}`;
         const id = node_crypto_1.default.randomUUID();
-        store_1.registry.instances[id] = { id, name, locationId, status: 'starting', createdAt: new Date().toISOString(), qr: null, lastError: null };
+        store_1.registry.instances[id] = {
+            id,
+            name,
+            locationId,
+            status: 'starting',
+            createdAt: new Date().toISOString(),
+            qr: null,
+            lastError: null,
+            slot,
+            isDefault: existing.length === 0
+        };
         await (0, store_1.save)();
         if (!ghl.isConnected(locationId))
             (0, events_1.recordEvent)('warn', `Instance created for ${locationId}, which is not connected to HighLevel yet`, { instanceId: id, locationId });
@@ -122,6 +148,36 @@ app.get('/instances/:id', (req, res) => {
     if (!instance)
         return res.status(404).json({ error: 'Not found' });
     res.json({ instance: publicInstance(instance) });
+});
+// Rename a number or make it the sub-account's default sender.
+app.patch('/instances/:id', async (req, res) => {
+    const instance = store_1.registry.instances[req.params.id];
+    if (!instance)
+        return res.status(404).json({ error: 'Not found' });
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 40) : undefined;
+    if (name)
+        instance.name = name;
+    if (req.body?.isDefault === true)
+        (0, numbers_1.setDefault)(instance.id);
+    await (0, store_1.save)();
+    res.json({ instance: publicInstance(store_1.registry.instances[instance.id]) });
+});
+// One sub-account's numbers, limit and HighLevel readiness (what the sub-account page needs).
+app.get('/locations/:locationId', (req, res) => {
+    const { locationId } = req.params;
+    res.json({
+        locationId,
+        limit: (0, numbers_1.limitFor)(locationId),
+        ghlReady: ghl.connectionProblem(locationId) === null,
+        numbers: (0, numbers_1.numbersOf)(locationId).map(publicInstance)
+    });
+});
+app.put('/locations/:locationId/limit', async (req, res) => {
+    const limit = Number(req.body?.limit);
+    if (!Number.isInteger(limit) || limit < 0 || limit > 100)
+        return res.status(400).json({ error: 'limit must be a whole number from 0 to 100' });
+    await (0, numbers_1.setLimit)(req.params.locationId, limit);
+    res.json({ locationId: req.params.locationId, limit });
 });
 app.post('/instances/:id/restart', async (req, res) => {
     try {
@@ -296,7 +352,7 @@ app.post(WEBHOOK_PATHS, express_1.default.raw({ type: () => true, limit: '2mb' }
     bridge.handleProviderOutbound(payload);
     res.json({ success: true, messageId: payload.messageId ?? null });
 });
-app.get('/diagnostics', (_req, res) => {
+function diagnostics() {
     const instances = Object.values(store_1.registry.instances);
     const locations = knownLocations();
     const relative = config_1.VOLUME_PATH ? node_path_1.default.relative(config_1.VOLUME_PATH, config_1.DATA_DIR) : null;
@@ -353,7 +409,7 @@ app.get('/diagnostics', (_req, res) => {
             ? { id: 'whatsapp', level: 'ok', message: 'At least one WhatsApp number is connected.' }
             : { id: 'whatsapp', level: 'error', message: 'No WhatsApp number is connected. Create or reconnect an instance and scan the QR code.' }
     ];
-    res.json({
+    return {
         build: config_1.BUILD,
         commit: config_1.COMMIT || null,
         startedAt,
@@ -367,6 +423,33 @@ app.get('/diagnostics', (_req, res) => {
         agencies: Object.keys(store_1.registry.companies).map(agencySummary),
         instances: instances.map(publicInstance),
         events: (0, events_1.recentEvents)(100)
+    };
+}
+app.get('/diagnostics', (_req, res) => res.json(diagnostics()));
+// Everything the admin dashboard shows, grouped by sub-account.
+app.get('/admin/overview', (_req, res) => {
+    const { checks, events, providerId, inboundType } = diagnostics();
+    const locationIds = [...new Set([...knownLocations(), ...Object.keys(store_1.registry.settings.limits ?? {})])];
+    res.json({
+        build: config_1.BUILD,
+        commit: config_1.COMMIT || null,
+        startedAt,
+        providerId,
+        inboundType,
+        protection: {
+            newChatsPerDay: config_1.NEW_CHATS_PER_DAY,
+            warmupDays: config_1.WARMUP_DAYS,
+            warmupNewChatsPerDay: config_1.WARMUP_NEW_CHATS_PER_DAY,
+            coldMessagesPerContact: config_1.COLD_MESSAGES_PER_CONTACT
+        },
+        checks,
+        locations: locationIds.map(locationId => ({
+            locationId,
+            limit: (0, numbers_1.limitFor)(locationId),
+            ghl: { connected: ghl.isConnected(locationId), problem: ghl.connectionProblem(locationId) },
+            numbers: (0, numbers_1.numbersOf)(locationId).map(publicInstance)
+        })),
+        events
     });
 });
 process.on('unhandledRejection', err => events_1.log.error({ err }, 'Unhandled promise rejection'));
@@ -377,6 +460,9 @@ async function main() {
     if (ghlPublicKey.error)
         (0, events_1.recordEvent)('warn', ghlPublicKey.error);
     (0, events_1.recordEvent)('info', `Worker started (build ${config_1.BUILD}${config_1.COMMIT ? `, commit ${config_1.COMMIT}` : ''})`);
+    if ((0, numbers_1.assignSlotsAndDefaults)())
+        await (0, store_1.save)();
+    await bridge.loadProtection();
     const moved = await ghl.migrateAgencyTokens();
     if (moved.length)
         (0, events_1.recordEvent)('warn', `Found agency (Company) tokens stored as sub-account tokens; moved them to agency connections: ${moved.join(', ')}`);
@@ -394,6 +480,7 @@ async function main() {
         events_1.log.info({ signal }, 'Shutting down');
         bridge.shutdown();
         await (0, store_1.save)();
+        await bridge.flushProtection();
         await (0, events_1.flushEvents)();
         server.close();
         setTimeout(() => process.exit(0), 1500).unref();

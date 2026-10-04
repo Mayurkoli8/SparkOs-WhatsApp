@@ -1,50 +1,68 @@
 import { NextResponse } from 'next/server';
 import { workerFetch } from '@/lib/worker';
 
-// The sub-account page's only API. Every response is limited to the one location in the URL; the admin APIs
-// (which list every sub-account) are never exposed to it.
+// The sub-account page's only API. Every response and action is limited to the one location in the URL, and numbers
+// are addressed by their slot (#1, #2…), never by internal ids.
 type C = { params: Promise<{ locationId: string }> };
-type WorkerInstance = { id: string; locationId: string; status: string; phone?: string; qr?: string | null; createdAt: string };
+type WorkerNumber = {
+  id: string;
+  slot: number | null;
+  name: string;
+  phone?: string | null;
+  status: string;
+  qr?: string | null;
+  isDefault: boolean;
+  restrictedUntil: number | null;
+  protection?: { warmingUp: boolean };
+};
+type WorkerLocation = { locationId: string; limit: number; ghlReady: boolean; numbers: WorkerNumber[] };
 
 const LOCATION_ID = /^[A-Za-z0-9_-]{6,64}$/;
 
-const unavailable = () =>
-  NextResponse.json({ error: 'WhatsApp is temporarily unavailable. Please try again in a moment.' }, { status: 503 });
+const unavailable = () => NextResponse.json({ error: 'WhatsApp is temporarily unavailable. Please try again in a moment.' }, { status: 503 });
 const unknownLocation = () => NextResponse.json({ error: 'Unknown sub-account.' }, { status: 404 });
+const badRequest = (error: string) => NextResponse.json({ error }, { status: 400 });
 
-async function instancesFor(locationId: string): Promise<WorkerInstance[] | null> {
-  const res = await workerFetch('/instances', { cache: 'no-store' }).catch(() => null);
-  if (!res?.ok) return null;
-  const all: WorkerInstance[] = (await res.json()).instances ?? [];
-  return all.filter(i => i.locationId === locationId);
+async function load(locationId: string): Promise<WorkerLocation | null> {
+  const res = await workerFetch(`/locations/${encodeURIComponent(locationId)}`, { cache: 'no-store' }).catch(() => null);
+  return res?.ok ? res.json() : null;
 }
 
-// The connected instance wins; otherwise the newest one.
-function primary(list: WorkerInstance[]) {
-  return list.find(i => i.status === 'connected') ?? [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
-}
-
-async function view(locationId: string) {
-  const list = await instancesFor(locationId);
-  if (!list) return null;
-  const instance = primary(list);
-  // null = not known yet (the worker only tracks HighLevel status for locations it has seen).
-  let ghlReady: boolean | null = null;
-  const res = await workerFetch('/integrations/ghl', { cache: 'no-store' }).catch(() => null);
-  if (res?.ok) {
-    const problems: Record<string, string | null> = (await res.json()).problems ?? {};
-    if (locationId in problems) ghlReady = problems[locationId] === null;
-  }
+function view(location: WorkerLocation) {
   return {
-    locationId,
-    ghlReady,
-    instance: instance ? { status: instance.status, phone: instance.phone ?? null, qr: instance.qr ?? null } : null
+    locationId: location.locationId,
+    ghlReady: location.ghlReady,
+    limit: location.limit,
+    numbers: location.numbers.map(n => ({
+      slot: n.slot,
+      name: n.name,
+      phone: n.phone ?? null,
+      status: n.status,
+      qr: n.qr ?? null,
+      isDefault: n.isDefault,
+      restricted: Boolean(n.restrictedUntil),
+      warmingUp: Boolean(n.protection?.warmingUp)
+    }))
   };
 }
 
 async function respond(locationId: string) {
-  const current = await view(locationId);
-  return current ? NextResponse.json(current, { headers: { 'cache-control': 'no-store' } }) : unavailable();
+  const location = await load(locationId);
+  return location ? NextResponse.json(view(location), { headers: { 'cache-control': 'no-store' } }) : unavailable();
+}
+
+// Pass the worker's own message through when it is meant for people (e.g. the number limit).
+async function relay(res: Response | null, locationId: string) {
+  if (!res) return unavailable();
+  if (res.status === 409) return NextResponse.json({ error: (await res.json().catch(() => ({}))).error || 'Not allowed.' }, { status: 409 });
+  if (!res.ok) return unavailable();
+  return respond(locationId);
+}
+
+async function numberBySlot(locationId: string, slot: unknown) {
+  const location = await load(locationId);
+  if (!location) return { location: null, number: null };
+  return { location, number: location.numbers.find(n => n.slot === Number(slot)) ?? null };
 }
 
 export async function GET(_req: Request, { params }: C) {
@@ -53,30 +71,52 @@ export async function GET(_req: Request, { params }: C) {
   return respond(locationId);
 }
 
-// Connect (or reconnect) this sub-account's WhatsApp; { action: "relink" } discards the current login for a new QR.
+// { action: "add", name } adds a number (within the limit); { action: "reconnect" | "relink", slot } restarts one,
+// "relink" discarding its WhatsApp login for a new QR code.
 export async function POST(req: Request, { params }: C) {
   const { locationId } = await params;
   if (!LOCATION_ID.test(locationId)) return unknownLocation();
-  const { action } = await req.json().catch(() => ({ action: undefined }));
-  const list = await instancesFor(locationId);
-  if (!list) return unavailable();
-  const current = primary(list);
-  const res = current
-    ? await workerFetch(`/instances/${encodeURIComponent(current.id)}/restart`, { method: 'POST', body: JSON.stringify({ fresh: action === 'relink' }) }).catch(() => null)
-    : await workerFetch('/instances', { method: 'POST', body: JSON.stringify({ locationId, name: 'WhatsApp' }) }).catch(() => null);
-  if (!res?.ok) return unavailable();
-  return respond(locationId);
+  const { action, name, slot } = await req.json().catch(() => ({}));
+  if (action === 'add') {
+    const res = await workerFetch('/instances', {
+      method: 'POST',
+      body: JSON.stringify({ locationId, name: typeof name === 'string' ? name : '', enforceLimit: true })
+    }).catch(() => null);
+    return relay(res, locationId);
+  }
+  if (action !== 'reconnect' && action !== 'relink') return badRequest('Unknown action.');
+  const { location, number } = await numberBySlot(locationId, slot);
+  if (!location) return unavailable();
+  if (!number) return badRequest('That number does not exist.');
+  const res = await workerFetch(`/instances/${encodeURIComponent(number.id)}/restart`, {
+    method: 'POST',
+    body: JSON.stringify({ fresh: action === 'relink' })
+  }).catch(() => null);
+  return relay(res, locationId);
 }
 
-// Disconnect: unlink every WhatsApp session of this sub-account.
-export async function DELETE(_req: Request, { params }: C) {
+// { slot, name } renames a number; { slot, isDefault: true } makes it the default sender.
+export async function PATCH(req: Request, { params }: C) {
   const { locationId } = await params;
   if (!LOCATION_ID.test(locationId)) return unknownLocation();
-  const list = await instancesFor(locationId);
-  if (!list) return unavailable();
-  for (const instance of list) {
-    const res = await workerFetch(`/instances/${encodeURIComponent(instance.id)}`, { method: 'DELETE' }).catch(() => null);
-    if (!res?.ok) return unavailable();
-  }
-  return respond(locationId);
+  const { slot, name, isDefault } = await req.json().catch(() => ({}));
+  const { location, number } = await numberBySlot(locationId, slot);
+  if (!location) return unavailable();
+  if (!number) return badRequest('That number does not exist.');
+  const res = await workerFetch(`/instances/${encodeURIComponent(number.id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name: typeof name === 'string' ? name : undefined, isDefault: isDefault === true })
+  }).catch(() => null);
+  return relay(res, locationId);
+}
+
+// ?slot=2 disconnects (unlinks) that number.
+export async function DELETE(req: Request, { params }: C) {
+  const { locationId } = await params;
+  if (!LOCATION_ID.test(locationId)) return unknownLocation();
+  const { location, number } = await numberBySlot(locationId, new URL(req.url).searchParams.get('slot'));
+  if (!location) return unavailable();
+  if (!number) return badRequest('That number does not exist.');
+  const res = await workerFetch(`/instances/${encodeURIComponent(number.id)}`, { method: 'DELETE' }).catch(() => null);
+  return relay(res, locationId);
 }

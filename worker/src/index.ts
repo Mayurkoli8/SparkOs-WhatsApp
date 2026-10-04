@@ -3,6 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import {
   BUILD,
+  COLD_MESSAGES_PER_CONTACT,
   COMMIT,
   DATA_DIR,
   DATA_VOLUME,
@@ -11,16 +12,20 @@ import {
   GHL_WEBHOOK_PUBLIC_KEY,
   INBOUND_TYPE,
   INTERNAL_API_KEY,
+  NEW_CHATS_PER_DAY,
   PORT,
   PROVIDER_ID,
   SIGNATURE_CHECK_DISABLED,
   SYNC_PHONE_MESSAGES,
   TOKEN_REFRESH_URL,
-  VOLUME_PATH
+  VOLUME_PATH,
+  WARMUP_DAYS,
+  WARMUP_NEW_CHATS_PER_DAY
 } from './config';
 import { errorText, flushEvents, loadEvents, log, recentEvents, recordEvent } from './events';
 import * as ghl from './ghl';
 import * as bridge from './bridge';
+import { assignSlotsAndDefaults, claimSlot, limitFor, numbersOf, setDefault, setLimit } from './numbers';
 import { getTokenKeySource, initTokenKey, loadRegistry, registry, save, type InstanceRecord } from './store';
 import { loadGhlPublicKey, verifyGhlSignature } from './signature';
 
@@ -54,18 +59,27 @@ app.use((req, res, next) => {
   next();
 });
 
-const publicInstance = ({ id, name, locationId, status, phone, createdAt, updatedAt, qr, lastError }: InstanceRecord) => ({
-  id,
-  name,
-  locationId,
-  status,
-  phone,
-  createdAt,
-  updatedAt,
-  qr: qr || null,
-  lastError: lastError || null,
-  ghlConnected: ghl.isConnected(locationId)
-});
+const publicInstance = (instance: InstanceRecord) => {
+  const { id, name, locationId, status, phone, createdAt, updatedAt, qr, lastError, slot, isDefault, linkedAt } = instance;
+  const protection = bridge.protection.stats(id, bridge.numberState(instance), Date.now());
+  return {
+    id,
+    name,
+    locationId,
+    status,
+    phone,
+    createdAt,
+    updatedAt,
+    qr: qr || null,
+    lastError: lastError || null,
+    slot: slot ?? null,
+    isDefault: Boolean(isDefault),
+    linkedAt: linkedAt || null,
+    restrictedUntil: protection.restricted ? instance.restrictedUntil : null,
+    protection,
+    ghlConnected: ghl.isConnected(locationId)
+  };
+};
 
 function sendError(res: express.Response, err: unknown, status = 500) {
   res.status(status).json({ error: errorText(err) });
@@ -90,10 +104,26 @@ app.get('/instances', (_req, res) => res.json({ instances: Object.values(registr
 app.post('/instances', async (req, res) => {
   try {
     const locationId = String(req.body?.locationId || '').trim();
-    const name = String(req.body?.name || 'WhatsApp Instance').trim() || 'WhatsApp Instance';
     if (!locationId) return res.status(400).json({ error: 'locationId is required' });
+    const existing = numbersOf(locationId);
+    // Sub-account self-service respects the limit; the admin may go beyond it.
+    if (req.body?.enforceLimit === true && existing.length >= limitFor(locationId)) {
+      return res.status(409).json({ error: `This sub-account already uses all ${limitFor(locationId)} of its WhatsApp numbers.` });
+    }
+    const slot = claimSlot(locationId);
+    const name = String(req.body?.name || '').trim().slice(0, 40) || `Number ${slot}`;
     const id = crypto.randomUUID();
-    registry.instances[id] = { id, name, locationId, status: 'starting', createdAt: new Date().toISOString(), qr: null, lastError: null };
+    registry.instances[id] = {
+      id,
+      name,
+      locationId,
+      status: 'starting',
+      createdAt: new Date().toISOString(),
+      qr: null,
+      lastError: null,
+      slot,
+      isDefault: existing.length === 0
+    };
     await save();
     if (!ghl.isConnected(locationId)) recordEvent('warn', `Instance created for ${locationId}, which is not connected to HighLevel yet`, { instanceId: id, locationId });
     await bridge.startInstance(id);
@@ -107,6 +137,35 @@ app.get('/instances/:id', (req, res) => {
   const instance = registry.instances[req.params.id];
   if (!instance) return res.status(404).json({ error: 'Not found' });
   res.json({ instance: publicInstance(instance) });
+});
+
+// Rename a number or make it the sub-account's default sender.
+app.patch('/instances/:id', async (req, res) => {
+  const instance = registry.instances[req.params.id];
+  if (!instance) return res.status(404).json({ error: 'Not found' });
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 40) : undefined;
+  if (name) instance.name = name;
+  if (req.body?.isDefault === true) setDefault(instance.id);
+  await save();
+  res.json({ instance: publicInstance(registry.instances[instance.id]) });
+});
+
+// One sub-account's numbers, limit and HighLevel readiness (what the sub-account page needs).
+app.get('/locations/:locationId', (req, res) => {
+  const { locationId } = req.params;
+  res.json({
+    locationId,
+    limit: limitFor(locationId),
+    ghlReady: ghl.connectionProblem(locationId) === null,
+    numbers: numbersOf(locationId).map(publicInstance)
+  });
+});
+
+app.put('/locations/:locationId/limit', async (req, res) => {
+  const limit = Number(req.body?.limit);
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100) return res.status(400).json({ error: 'limit must be a whole number from 0 to 100' });
+  await setLimit(req.params.locationId, limit);
+  res.json({ locationId: req.params.locationId, limit });
 });
 
 app.post('/instances/:id/restart', async (req, res) => {
@@ -286,7 +345,7 @@ app.post(WEBHOOK_PATHS, express.raw({ type: () => true, limit: '2mb' }), (req, r
 
 type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
 
-app.get('/diagnostics', (_req, res) => {
+function diagnostics() {
   const instances = Object.values(registry.instances);
   const locations = knownLocations();
   const relative = VOLUME_PATH ? path.relative(VOLUME_PATH, DATA_DIR) : null;
@@ -343,7 +402,7 @@ app.get('/diagnostics', (_req, res) => {
       ? { id: 'whatsapp', level: 'ok', message: 'At least one WhatsApp number is connected.' }
       : { id: 'whatsapp', level: 'error', message: 'No WhatsApp number is connected. Create or reconnect an instance and scan the QR code.' }
   ];
-  res.json({
+  return {
     build: BUILD,
     commit: COMMIT || null,
     startedAt,
@@ -357,6 +416,35 @@ app.get('/diagnostics', (_req, res) => {
     agencies: Object.keys(registry.companies).map(agencySummary),
     instances: instances.map(publicInstance),
     events: recentEvents(100)
+  };
+}
+
+app.get('/diagnostics', (_req, res) => res.json(diagnostics()));
+
+// Everything the admin dashboard shows, grouped by sub-account.
+app.get('/admin/overview', (_req, res) => {
+  const { checks, events, providerId, inboundType } = diagnostics();
+  const locationIds = [...new Set([...knownLocations(), ...Object.keys(registry.settings.limits ?? {})])];
+  res.json({
+    build: BUILD,
+    commit: COMMIT || null,
+    startedAt,
+    providerId,
+    inboundType,
+    protection: {
+      newChatsPerDay: NEW_CHATS_PER_DAY,
+      warmupDays: WARMUP_DAYS,
+      warmupNewChatsPerDay: WARMUP_NEW_CHATS_PER_DAY,
+      coldMessagesPerContact: COLD_MESSAGES_PER_CONTACT
+    },
+    checks,
+    locations: locationIds.map(locationId => ({
+      locationId,
+      limit: limitFor(locationId),
+      ghl: { connected: ghl.isConnected(locationId), problem: ghl.connectionProblem(locationId) },
+      numbers: numbersOf(locationId).map(publicInstance)
+    })),
+    events
   });
 });
 
@@ -368,6 +456,8 @@ async function main() {
   await initTokenKey();
   if (ghlPublicKey.error) recordEvent('warn', ghlPublicKey.error);
   recordEvent('info', `Worker started (build ${BUILD}${COMMIT ? `, commit ${COMMIT}` : ''})`);
+  if (assignSlotsAndDefaults()) await save();
+  await bridge.loadProtection();
   const moved = await ghl.migrateAgencyTokens();
   if (moved.length) recordEvent('warn', `Found agency (Company) tokens stored as sub-account tokens; moved them to agency connections: ${moved.join(', ')}`);
   const server = app.listen(PORT, '0.0.0.0', () => log.info({ port: PORT, dataDir: DATA_DIR }, 'Worker listening'));
@@ -383,6 +473,7 @@ async function main() {
     log.info({ signal }, 'Shutting down');
     bridge.shutdown();
     await save();
+    await bridge.flushProtection();
     await flushEvents();
     server.close();
     setTimeout(() => process.exit(0), 1500).unref();

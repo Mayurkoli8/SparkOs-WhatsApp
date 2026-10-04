@@ -1,0 +1,63 @@
+"use strict";
+// Which of a sub-account's WhatsApp numbers sends an outgoing message:
+// a {WA#2} / {WA:Sales} / {WA:+91…} token in the message, then the contact's "wa: +number" tag,
+// then the sub-account's default number, then the remaining numbers by slot.
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.parseRouteToken = parseRouteToken;
+exports.formatWaTag = formatWaTag;
+exports.isWaTag = isWaTag;
+exports.parseWaTag = parseWaTag;
+exports.routeCandidates = routeCandidates;
+const TOKEN = /\{\s*wa\s*(?:#\s*(\d+)|:\s*([^}]+?))\s*\}/i;
+const WA_TAG = /^\s*wa:\s*\+?(\d{6,15})\s*$/i;
+function parseRouteToken(message) {
+    const match = TOKEN.exec(message);
+    if (!match)
+        return { token: null, text: message };
+    const text = `${message.slice(0, match.index)} ${message.slice(match.index + match[0].length)}`.replace(/[ \t]{2,}/g, ' ').trim();
+    if (match[1])
+        return { token: { kind: 'slot', value: match[1] }, text };
+    const raw = match[2].trim();
+    const digits = raw.replace(/[\s()+-]/g, '');
+    const token = /^[+\d\s()-]+$/.test(raw) && /^\d{6,15}$/.test(digits) ? { kind: 'phone', value: digits } : { kind: 'name', value: raw };
+    return { token, text };
+}
+function formatWaTag(phone) {
+    return `wa: +${phone.replace(/\D/g, '')}`;
+}
+function isWaTag(tag) {
+    return /^\s*wa:/i.test(tag);
+}
+function parseWaTag(tags) {
+    for (const tag of tags ?? []) {
+        const match = WA_TAG.exec(tag);
+        if (match)
+            return match[1];
+    }
+    return null;
+}
+function describe(token) {
+    return token.kind === 'slot' ? `#${token.value}` : token.kind === 'phone' ? `+${token.value}` : `"${token.value}"`;
+}
+function matches(number, token) {
+    if (token.kind === 'slot')
+        return number.slot === Number(token.value);
+    if (token.kind === 'phone')
+        return number.phone === token.value;
+    return number.name.trim().toLowerCase() === token.value.trim().toLowerCase();
+}
+// Ordered candidates: the preferred number first, then the default, then the rest by slot.
+function routeCandidates(numbers, opts) {
+    const bySlot = [...numbers].sort((a, b) => a.slot - b.slot);
+    const fallback = [...bySlot.filter(n => n.isDefault), ...bySlot.filter(n => !n.isDefault)];
+    let preferred;
+    if (opts.token) {
+        preferred = bySlot.find(n => matches(n, opts.token));
+        if (!preferred)
+            throw new Error(`No WhatsApp number ${describe(opts.token)} in this sub-account`);
+    }
+    else if (opts.taggedPhone) {
+        preferred = bySlot.find(n => n.phone === opts.taggedPhone);
+    }
+    return preferred ? [preferred, ...fallback.filter(n => n !== preferred)] : fallback;
+}

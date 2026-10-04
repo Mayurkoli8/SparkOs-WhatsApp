@@ -14,6 +14,12 @@ export type InstanceRecord = {
   updatedAt?: string;
   qr?: string | null;
   lastError?: string | null;
+  // Multi-number: a permanent per-sub-account slot (#1, #2… used in {WA#2}) and the default sender.
+  slot?: number;
+  isDefault?: boolean;
+  linkedAt?: string | null;
+  // WhatsApp stops this number from starting new chats until then (epoch ms).
+  restrictedUntil?: number | null;
 };
 
 export type GhlConnection = {
@@ -53,7 +59,7 @@ export type Registry = {
   companies: Record<string, CompanyConnection>;
   // Learned from HighLevel: the inbound message type its conversation provider accepts, and the provider id it
   // actually uses (read from a message sent through the provider).
-  settings: { inboundType?: string; providerId?: string };
+  settings: { inboundType?: string; providerId?: string; limits?: Record<string, number>; slotCounters?: Record<string, number> };
 };
 
 export const REGISTRY_FILE = path.join(DATA_DIR, 'registry.json');

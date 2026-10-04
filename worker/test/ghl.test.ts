@@ -156,6 +156,25 @@ test('a contact phone can be looked up for delivery payloads without one', async
   assert.equal(callsTo('GET', '/contacts/C7')[0].headers.version, '2021-07-28');
 });
 
+test('the wa tag is replaced, not added next to an old one', async () => {
+  on('GET', '/contacts/C5', () => ({ json: { contact: { id: 'C5', tags: ['vip', 'wa: +919000000001'] } } }));
+  on('DELETE', '/contacts/C5/tags', () => ({ json: { tags: ['vip'] } }));
+  on('POST', '/contacts/C5/tags', () => ({ json: { tags: ['vip', 'wa: +919000000002'] } }));
+
+  await ghl.setContactWaTag('LOC1', 'C5', '919000000002');
+  assert.deepEqual(callsTo('DELETE', '/contacts/C5/tags')[0].body, { tags: ['wa: +919000000001'] });
+  assert.deepEqual(callsTo('POST', '/contacts/C5/tags')[0].body, { tags: ['wa: +919000000002'] });
+  assert.equal(callsTo('POST', '/contacts/C5/tags')[0].headers.version, '2021-07-28');
+});
+
+test('a contact that already has the right wa tag is left alone', async () => {
+  on('GET', '/contacts/C6', () => ({ json: { contact: { id: 'C6', tags: ['wa: +919000000002'] } } }));
+
+  await ghl.setContactWaTag('LOC1', 'C6', '919000000002');
+  assert.equal(callsTo('DELETE', '/contacts/C6/tags').length + callsTo('POST', '/contacts/C6/tags').length, 0);
+  assert.equal(await ghl.getContactWaTag('LOC1', 'C6'), '919000000002');
+});
+
 test('new contacts are named from the WhatsApp profile', async () => {
   on('POST', '/contacts/upsert', () => ({ json: { new: true, contact: { id: 'C2' } } }));
   on('PUT', '/contacts/C2', () => ({ json: { succeded: true } }));
