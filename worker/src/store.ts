@@ -51,10 +51,12 @@ export type Registry = {
   instances: Record<string, InstanceRecord>;
   ghl: Record<string, GhlConnection>;
   companies: Record<string, CompanyConnection>;
+  // Learned from HighLevel: the inbound message type its conversation provider accepts.
+  settings: { inboundType?: string };
 };
 
 export const REGISTRY_FILE = path.join(DATA_DIR, 'registry.json');
-export const registry: Registry = { instances: {}, ghl: {}, companies: {} };
+export const registry: Registry = { instances: {}, ghl: {}, companies: {}, settings: {} };
 
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -78,6 +80,7 @@ export async function loadRegistry() {
     registry.instances = parsed.instances || {};
     registry.ghl = parsed.ghl || {};
     registry.companies = parsed.companies || {};
+    registry.settings = parsed.settings || {};
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       const backup = `${REGISTRY_FILE}.corrupt-${Date.now()}`;
@@ -87,6 +90,7 @@ export async function loadRegistry() {
     registry.instances = {};
     registry.ghl = {};
     registry.companies = {};
+    registry.settings = {};
     await save();
   }
 }

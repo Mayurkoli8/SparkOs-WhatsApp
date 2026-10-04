@@ -1,4 +1,5 @@
 import { GHL_BASE, GHL_CLIENT_ID, GHL_CLIENT_SECRET, INBOUND_TYPE, PROVIDER_ID } from './config';
+import { recordEvent } from './events';
 import { decrypt, encrypt, registry, save, type CompanyConnection, type GhlConnection } from './store';
 
 // HighLevel rejects or misroutes calls without the per-API version from its OpenAPI spec.
@@ -419,20 +420,51 @@ export async function findOrCreateConversation(locationId: string, contactId: st
   }
 }
 
-export async function addInboundMessage(
-  locationId: string,
-  input: {
-    contactId: string;
-    conversationId: string;
-    message: string;
-    attachments?: string[];
-    altId?: string;
-    direction: 'inbound' | 'outbound';
-    date?: string;
+type InboundInput = {
+  contactId: string;
+  conversationId: string;
+  message: string;
+  attachments?: string[];
+  altId?: string;
+  direction: 'inbound' | 'outbound';
+  date?: string;
+  type?: string;
+};
+
+const PROVIDER_MISMATCH = /CONVERSATION_PROVIDER_MISMATCH|Incorrect conversationProviderId/i;
+
+// HighLevel has no API to read a provider's type, and a mismatched type is rejected before anything is created,
+// so try the plausible types once and remember the one HighLevel accepts.
+export async function addInboundMessageDetectingType(locationId: string, input: InboundInput) {
+  const candidates = [...new Set([registry.settings.inboundType, INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t): t is string => Boolean(t)))];
+  const rejected: string[] = [];
+  for (const type of candidates) {
+    try {
+      const result = await addInboundMessage(locationId, { ...input, type });
+      if (registry.settings.inboundType !== type) {
+        registry.settings.inboundType = type;
+        await save();
+        recordEvent('info', `HighLevel accepts this conversation provider's messages as type ${type}; using it from now on`, { locationId });
+      }
+      return result;
+    } catch (err) {
+      if (!(err instanceof GhlApiError) || !PROVIDER_MISMATCH.test(err.body)) throw err;
+      rejected.push(type);
+    }
   }
-): Promise<{ messageId?: string; conversationId?: string }> {
+  throw new Error(
+    `HighLevel rejected conversation provider ${PROVIDER_ID || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. The provider is not active in this sub-account: in the Marketplace app open Conversation Providers, check that this is the provider's ID, that its type is SMS and that it is saved, then confirm it appears in the sub-account under Settings → Conversation Providers or Settings → Phone Numbers → Advanced Settings → SMS Provider.`
+  );
+}
+
+export async function getContactPhone(locationId: string, contactId: string): Promise<string | null> {
+  const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: CONTACTS_VERSION });
+  return data.contact?.phone || null;
+}
+
+export async function addInboundMessage(locationId: string, input: InboundInput): Promise<{ messageId?: string; conversationId?: string }> {
   const body: Record<string, unknown> = {
-    type: INBOUND_TYPE,
+    type: input.type || INBOUND_TYPE,
     contactId: input.contactId,
     conversationId: input.conversationId,
     conversationProviderId: PROVIDER_ID || undefined,

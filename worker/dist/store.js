@@ -17,7 +17,7 @@ const node_path_1 = __importDefault(require("node:path"));
 const config_1 = require("./config");
 const events_1 = require("./events");
 exports.REGISTRY_FILE = node_path_1.default.join(config_1.DATA_DIR, 'registry.json');
-exports.registry = { instances: {}, ghl: {}, companies: {} };
+exports.registry = { instances: {}, ghl: {}, companies: {}, settings: {} };
 let writeChain = Promise.resolve();
 // Writes are serialised and atomic (temp file + rename) so overlapping saves can never leave half-written JSON.
 function save() {
@@ -38,6 +38,7 @@ async function loadRegistry() {
         exports.registry.instances = parsed.instances || {};
         exports.registry.ghl = parsed.ghl || {};
         exports.registry.companies = parsed.companies || {};
+        exports.registry.settings = parsed.settings || {};
     }
     catch (err) {
         if (err.code !== 'ENOENT') {
@@ -48,6 +49,7 @@ async function loadRegistry() {
         exports.registry.instances = {};
         exports.registry.ghl = {};
         exports.registry.companies = {};
+        exports.registry.settings = {};
         await save();
     }
 }

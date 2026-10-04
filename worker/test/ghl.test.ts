@@ -90,6 +90,54 @@ test('inbound sync uses the documented API versions, IDs and provider', async ()
   assert.equal(callsTo('PUT', '/contacts/C1').length, 0, 'existing contacts must not be renamed');
 });
 
+test('the provider message type is detected once and remembered', async () => {
+  registry.settings = {};
+  const types: string[] = [];
+  on('POST', '/conversations/messages/inbound', call => {
+    types.push(call.body.type);
+    return call.body.type === 'Custom'
+      ? { json: { success: true, messageId: `GM-${types.length}` } }
+      : { status: 400, json: { statusCode: 400, message: 'Incorrect conversationProviderId/type', canonicalCode: 'CONVERSATIONS_MSG_CONVERSATION_PROVIDER_MISMATCH' } };
+  });
+  const input = { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' as const };
+
+  assert.equal((await ghl.addInboundMessageDetectingType('LOC1', input)).messageId, 'GM-2');
+  assert.deepEqual(types, ['SMS', 'Custom']);
+  assert.equal(registry.settings.inboundType, 'Custom');
+
+  await ghl.addInboundMessageDetectingType('LOC1', input);
+  assert.deepEqual(types, ['SMS', 'Custom', 'Custom']);
+});
+
+test('a provider HighLevel rejects for every type is reported as not active', async () => {
+  registry.settings = {};
+  on('POST', '/conversations/messages/inbound', () => ({
+    status: 400,
+    json: { statusCode: 400, message: 'Incorrect conversationProviderId/type', canonicalCode: 'CONVERSATIONS_MSG_CONVERSATION_PROVIDER_MISMATCH' }
+  }));
+
+  await assert.rejects(
+    ghl.addInboundMessageDetectingType('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' }),
+    (err: unknown) => err instanceof Error && /provider-123/.test(err.message) && /SMS, Custom, WhatsApp/.test(err.message)
+  );
+  assert.equal(callsTo('POST', '/conversations/messages/inbound').length, 3);
+});
+
+test('other inbound errors are not retried with other types', async () => {
+  registry.settings = {};
+  on('POST', '/conversations/messages/inbound', () => ({ status: 422, json: { message: 'contactId must be valid' } }));
+
+  await assert.rejects(ghl.addInboundMessageDetectingType('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' }), ghl.GhlApiError);
+  assert.equal(callsTo('POST', '/conversations/messages/inbound').length, 1);
+});
+
+test('a contact phone can be looked up for delivery payloads without one', async () => {
+  on('GET', '/contacts/C7', () => ({ json: { contact: { id: 'C7', phone: '+919876543210' } } }));
+
+  assert.equal(await ghl.getContactPhone('LOC1', 'C7'), '+919876543210');
+  assert.equal(callsTo('GET', '/contacts/C7')[0].headers.version, '2021-07-28');
+});
+
 test('new contacts are named from the WhatsApp profile', async () => {
   on('POST', '/contacts/upsert', () => ({ json: { new: true, contact: { id: 'C2' } } }));
   on('PUT', '/contacts/C2', () => ({ json: { succeded: true } }));

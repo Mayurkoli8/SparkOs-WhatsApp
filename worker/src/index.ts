@@ -314,12 +314,12 @@ app.get('/diagnostics', (_req, res) => {
       : brokenLocations.length
         ? { id: 'ghl', level: 'error', message: brokenLocations.map(([l, problem]) => `HighLevel connection for ${l}: ${problem}`).join(' ') }
         : { id: 'ghl', level: 'ok', message: `HighLevel connected for ${locations.filter(l => !unlinkedLocations.includes(l)).join(', ') || 'no locations yet'}` },
-    /^(SMS|Custom)$/.test(INBOUND_TYPE)
-      ? { id: 'inbound-type', level: 'ok', message: `Inbound messages are added as type ${INBOUND_TYPE}.` }
+    registry.settings.inboundType
+      ? { id: 'inbound-type', level: 'ok', message: `HighLevel accepts this provider's inbound messages as type ${registry.settings.inboundType}.` }
       : {
           id: 'inbound-type',
-          level: 'warn',
-          message: `GHL_INBOUND_TYPE is "${INBOUND_TYPE}". HighLevel documents custom SMS providers with type SMS; other types are routed to HighLevel's own channels, so replies may not reach this bridge. Set GHL_INBOUND_TYPE=SMS on the worker (or remove it).`
+          level: 'ok',
+          message: `The provider's message type is detected on the first synced message (trying ${INBOUND_TYPE} first, then SMS, Custom, WhatsApp).`
         },
     unlinkedLocations.length
       ? { id: 'location-match', level: 'error', message: `These instances' locations have no HighLevel connection: ${unlinkedLocations.join(', ')}` }

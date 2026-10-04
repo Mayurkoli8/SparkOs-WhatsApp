@@ -376,7 +376,7 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
   }
   const sentAt = timestampMs(msg);
   const send = () =>
-    ghl.addInboundMessage(locationId, {
+    ghl.addInboundMessageDetectingType(locationId, {
       contactId: target.contactId,
       conversationId: target.conversationId,
       message,
@@ -550,7 +550,12 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
   };
 
   if (payload.messageId && mirroredGhlIds.has(payload.messageId)) return;
-  const digits = (payload.phone || '').replace(/\D/g, '');
+  let phone = payload.phone || '';
+  // Some provider payloads carry only the contact; its phone number is on the contact record.
+  if (!phone && payload.contactId && ghl.isConnected(locationId)) {
+    phone = (await ghl.getContactPhone(locationId, payload.contactId).catch(() => null)) || '';
+  }
+  const digits = phone.replace(/\D/g, '');
   const text = (payload.message || '').trim();
   const attachments = (Array.isArray(payload.attachments) ? payload.attachments : []).filter(
     (u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u)
@@ -573,7 +578,7 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
       if (text) await sendTracked(session.sock, jid, { text }, delivery);
       for (const url of attachments) await sendTracked(session.sock, jid, await attachmentContent(url), delivery);
     });
-    recordEvent('info', `Delivered a HighLevel message to WhatsApp ${maskPhone(digits)}`, { ...context, instanceId: instance.id });
+    recordEvent('info', `Delivered a HighLevel message to WhatsApp ${maskPhone(digits)}`, { ...context, instanceId: instance.id, detail: `provider message type: ${payload.type || 'not given'}` });
   } catch (err) {
     await fail('WhatsApp rejected the send', errorText(err));
   }
