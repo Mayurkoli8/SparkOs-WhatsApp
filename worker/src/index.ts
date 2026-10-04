@@ -242,6 +242,14 @@ app.post('/integrations/ghl/connect', async (req, res) => {
   }
 });
 
+app.get('/integrations/ghl/:locationId/install-status', async (req, res) => {
+  try {
+    res.json(await ghl.installStatus(req.params.locationId));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.post('/integrations/ghl/:locationId/test', async (req, res) => {
   const { locationId } = req.params;
   if (!ghl.isConnected(locationId)) {

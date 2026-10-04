@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.REQUIRED_SCOPES = exports.GhlNotConnectedError = exports.GhlApiError = exports.CONVERSATIONS_VERSION = exports.CONTACTS_VERSION = void 0;
+exports.installStatus = installStatus;
 exports.isConnected = isConnected;
 exports.getAccessToken = getAccessToken;
 exports.saveAgencyConnection = saveAgencyConnection;
@@ -170,6 +171,57 @@ async function explainLocationAccess(company, locationId, agencyToken) {
     catch {
         return null;
     }
+}
+function decodeClaims(encryptedToken) {
+    try {
+        const payload = (0, store_1.decrypt)(encryptedToken).split('.')[1];
+        return payload ? JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) : {};
+    }
+    catch {
+        return {};
+    }
+}
+// Non-secret facts about how the app is installed for a location: which app version the agency authorized, and
+// whether HighLevel considers the app installed in that sub-account (and in which version).
+async function installStatus(locationId) {
+    const company = agencyFor(locationId);
+    const conn = store_1.registry.ghl[locationId];
+    const summarize = (claims) => ({
+        authClass: claims.authClass,
+        authClassId: claims.authClassId,
+        source: claims.source,
+        channel: claims.channel,
+        oauthMetaKeys: claims.oauthMeta ? Object.keys(claims.oauthMeta) : [],
+        client: claims.oauthMeta?.client,
+        versionId: claims.oauthMeta?.versionId,
+        scopes: claims.oauthMeta?.scopes
+    });
+    const result = {
+        locationId,
+        locationToken: conn ? { storedAs: conn.source || 'direct', ...summarize(decodeClaims(conn.accessToken)) } : null,
+        agencyToken: company ? { companyId: company.companyId, ...summarize(decodeClaims(company.accessToken)) } : null
+    };
+    if (!company)
+        return result;
+    const { appId } = agencyTokenInfo(company);
+    const token = await refreshableToken(`company ${company.companyId}`, company, 'Company', false);
+    const query = new URLSearchParams({ companyId: company.companyId, appId: appId || '', locationId, limit: '5' });
+    const res = await fetch(`${config_1.GHL_BASE}/oauth/installedLocations?${query}`, {
+        headers: { Authorization: `Bearer ${token}`, Version: exports.CONTACTS_VERSION, Accept: 'application/json' },
+        signal: AbortSignal.timeout(20_000)
+    });
+    const text = await res.text();
+    let entry = null;
+    try {
+        const found = (JSON.parse(text).locations || []).find((l) => l._id === locationId);
+        if (found)
+            entry = { isInstalled: found.isInstalled, versionId: found.versionId, installedAt: found.installedAt };
+    }
+    catch {
+        // reported below as the raw status
+    }
+    result.installedLocations = { appId, httpStatus: res.status, entry, error: res.ok ? undefined : text.slice(0, 300) };
+    return result;
 }
 // Agency installs get sub-account tokens from /oauth/locationToken; they carry no refresh token and are re-minted.
 async function mintLocationToken(company, locationId, retried = false) {

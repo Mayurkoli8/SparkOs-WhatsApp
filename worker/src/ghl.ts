@@ -150,6 +150,55 @@ async function explainLocationAccess(company: CompanyConnection, locationId: str
   }
 }
 
+function decodeClaims(encryptedToken: string): Record<string, any> {
+  try {
+    const payload = decrypt(encryptedToken).split('.')[1];
+    return payload ? JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) : {};
+  } catch {
+    return {};
+  }
+}
+
+// Non-secret facts about how the app is installed for a location: which app version the agency authorized, and
+// whether HighLevel considers the app installed in that sub-account (and in which version).
+export async function installStatus(locationId: string) {
+  const company = agencyFor(locationId);
+  const conn = registry.ghl[locationId];
+  const summarize = (claims: Record<string, any>) => ({
+    authClass: claims.authClass,
+    authClassId: claims.authClassId,
+    source: claims.source,
+    channel: claims.channel,
+    oauthMetaKeys: claims.oauthMeta ? Object.keys(claims.oauthMeta) : [],
+    client: claims.oauthMeta?.client,
+    versionId: claims.oauthMeta?.versionId,
+    scopes: claims.oauthMeta?.scopes
+  });
+  const result: Record<string, unknown> = {
+    locationId,
+    locationToken: conn ? { storedAs: conn.source || 'direct', ...summarize(decodeClaims(conn.accessToken)) } : null,
+    agencyToken: company ? { companyId: company.companyId, ...summarize(decodeClaims(company.accessToken)) } : null
+  };
+  if (!company) return result;
+  const { appId } = agencyTokenInfo(company);
+  const token = await refreshableToken(`company ${company.companyId}`, company, 'Company', false);
+  const query = new URLSearchParams({ companyId: company.companyId, appId: appId || '', locationId, limit: '5' });
+  const res = await fetch(`${GHL_BASE}/oauth/installedLocations?${query}`, {
+    headers: { Authorization: `Bearer ${token}`, Version: CONTACTS_VERSION, Accept: 'application/json' },
+    signal: AbortSignal.timeout(20_000)
+  });
+  const text = await res.text();
+  let entry: Record<string, unknown> | null = null;
+  try {
+    const found = (JSON.parse(text).locations || []).find((l: { _id?: string }) => l._id === locationId);
+    if (found) entry = { isInstalled: found.isInstalled, versionId: found.versionId, installedAt: found.installedAt };
+  } catch {
+    // reported below as the raw status
+  }
+  result.installedLocations = { appId, httpStatus: res.status, entry, error: res.ok ? undefined : text.slice(0, 300) };
+  return result;
+}
+
 // Agency installs get sub-account tokens from /oauth/locationToken; they carry no refresh token and are re-minted.
 async function mintLocationToken(company: CompanyConnection, locationId: string, retried = false): Promise<string> {
   const agencyToken = await refreshableToken(`company ${company.companyId}`, company, 'Company', retried);
