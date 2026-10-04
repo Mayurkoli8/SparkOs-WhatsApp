@@ -16,6 +16,7 @@ exports.getMessage = getMessage;
 exports.missingScopes = missingScopes;
 exports.claimsOf = claimsOf;
 exports.tokenClaims = tokenClaims;
+exports.agencyCanMint = agencyCanMint;
 exports.connectionProblem = connectionProblem;
 exports.testConnection = testConnection;
 const config_1 = require("./config");
@@ -418,15 +419,20 @@ function tokenClaims(locationId) {
         return null;
     }
 }
+// Judged by actual /oauth/locationToken results: the scope string GHL reports for agency tokens can omit oauth.write
+// even when minting works.
 function agencyProblem(company, locationId) {
     const mintError = company.mintErrors?.[locationId];
-    const canMint = (company.scope || '').split(/\s+/).includes('oauth.write');
-    if (!mintError && canMint)
+    if (!mintError)
         return company.lastError || null;
-    const reason = mintError
-        ? `HighLevel refused to create a sub-account token for ${locationId} (${mintError})`
-        : 'its token lacks the oauth.write scope needed to create sub-account tokens';
-    return `the app is installed at the agency level and ${reason}. Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
+    return `the app is installed at the agency level and HighLevel refused to create a sub-account token for ${locationId} (${mintError}). Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
+}
+function agencyCanMint(companyId) {
+    const company = store_1.registry.companies[companyId];
+    if (!company)
+        return false;
+    const minted = Object.values(store_1.registry.ghl).some(c => c.source === 'agency' && c.companyId === companyId);
+    return minted || (company.scope || '').split(/\s+/).includes('oauth.write');
 }
 function connectionProblem(locationId) {
     const conn = store_1.registry.ghl[locationId];

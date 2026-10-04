@@ -155,7 +155,7 @@ function agencySummary(companyId: string) {
   return {
     companyId,
     scope: company.scope || null,
-    canMint: (company.scope || '').split(/\s+/).includes('oauth.write'),
+    canMint: ghl.agencyCanMint(companyId),
     locationIds: company.locationIds,
     mintErrors: company.mintErrors || {},
     lastError: company.lastError || null,

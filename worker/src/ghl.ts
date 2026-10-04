@@ -427,14 +427,19 @@ export function tokenClaims(locationId: string) {
   }
 }
 
+// Judged by actual /oauth/locationToken results: the scope string GHL reports for agency tokens can omit oauth.write
+// even when minting works.
 function agencyProblem(company: CompanyConnection, locationId: string) {
   const mintError = company.mintErrors?.[locationId];
-  const canMint = (company.scope || '').split(/\s+/).includes('oauth.write');
-  if (!mintError && canMint) return company.lastError || null;
-  const reason = mintError
-    ? `HighLevel refused to create a sub-account token for ${locationId} (${mintError})`
-    : 'its token lacks the oauth.write scope needed to create sub-account tokens';
-  return `the app is installed at the agency level and ${reason}. Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
+  if (!mintError) return company.lastError || null;
+  return `the app is installed at the agency level and HighLevel refused to create a sub-account token for ${locationId} (${mintError}). Either add the oauth.readonly and oauth.write scopes to the Marketplace app and click "Connect GHL" again, or set the app's target user to Sub-account and install it into ${locationId}.`;
+}
+
+export function agencyCanMint(companyId: string) {
+  const company = registry.companies[companyId];
+  if (!company) return false;
+  const minted = Object.values(registry.ghl).some(c => c.source === 'agency' && c.companyId === companyId);
+  return minted || (company.scope || '').split(/\s+/).includes('oauth.write');
 }
 
 export function connectionProblem(locationId: string): string | null {
