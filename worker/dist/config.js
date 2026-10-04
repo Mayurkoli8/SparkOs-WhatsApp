@@ -3,12 +3,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMIT = exports.BUILD = exports.MAX_MEDIA_BYTES = exports.SEND_INTERVAL_MS = exports.SYNC_PHONE_MESSAGES = exports.GHL_WEBHOOK_PUBLIC_KEY = exports.SIGNATURE_CHECK_DISABLED = exports.TOKEN_REFRESH_URL = exports.GHL_CLIENT_SECRET = exports.GHL_CLIENT_ID = exports.INBOUND_TYPE = exports.PROVIDER_ID = exports.GHL_BASE = exports.INTERNAL_API_KEY = exports.DATA_DIR = exports.VOLUME_PATH = exports.PORT = void 0;
+exports.COMMIT = exports.BUILD = exports.MAX_MEDIA_BYTES = exports.SEND_INTERVAL_MS = exports.SYNC_PHONE_MESSAGES = exports.GHL_WEBHOOK_PUBLIC_KEY = exports.SIGNATURE_CHECK_DISABLED = exports.TOKEN_REFRESH_URL = exports.GHL_CLIENT_SECRET = exports.GHL_CLIENT_ID = exports.INBOUND_TYPE = exports.PROVIDER_ID = exports.GHL_BASE = exports.INTERNAL_API_KEY = exports.DATA_DIR = exports.DATA_VOLUME = exports.VOLUME_PATH = exports.PORT = void 0;
 const node_path_1 = __importDefault(require("node:path"));
 const env = process.env;
 exports.PORT = Number(env.PORT || 3001);
 // Railway exposes the mount path of an attached volume; prefer it so sessions and tokens survive redeploys.
 exports.VOLUME_PATH = env.RAILWAY_VOLUME_MOUNT_PATH || '';
+// Set by hosts that persist DATA_DIR some other way (the Docker kit sets it for its named volume).
+exports.DATA_VOLUME = env.DATA_VOLUME || '';
 exports.DATA_DIR = env.DATA_DIR || exports.VOLUME_PATH || node_path_1.default.resolve(process.cwd(), 'data');
 exports.INTERNAL_API_KEY = env.INTERNAL_API_KEY || '';
 exports.GHL_BASE = (env.GHL_API_BASE || 'https://services.leadconnectorhq.com').replace(/\/+$/, '');

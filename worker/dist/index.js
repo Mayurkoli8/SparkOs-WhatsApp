@@ -300,7 +300,7 @@ app.get('/diagnostics', (_req, res) => {
     const instances = Object.values(store_1.registry.instances);
     const locations = knownLocations();
     const relative = config_1.VOLUME_PATH ? node_path_1.default.relative(config_1.VOLUME_PATH, config_1.DATA_DIR) : null;
-    const persistent = relative === null ? null : !relative.startsWith('..') && !node_path_1.default.isAbsolute(relative);
+    const persistent = config_1.DATA_VOLUME ? true : relative === null ? null : !relative.startsWith('..') && !node_path_1.default.isAbsolute(relative);
     const keySource = (0, store_1.getTokenKeySource)();
     const problems = locations.map(l => [l, ghl.connectionProblem(l)]);
     const unlinkedLocations = problems.filter(([, p]) => p?.startsWith('HighLevel is not connected')).map(([l]) => l);
@@ -308,7 +308,7 @@ app.get('/diagnostics', (_req, res) => {
     const anyConnection = Object.keys(store_1.registry.ghl).length > 0 || Object.keys(store_1.registry.companies).length > 0;
     const checks = [
         persistent === true
-            ? { id: 'storage', level: 'ok', message: `Data is stored on the attached volume (${config_1.DATA_DIR}).` }
+            ? { id: 'storage', level: 'ok', message: `Data is stored on ${config_1.DATA_VOLUME || 'the attached volume'} (${config_1.DATA_DIR}).` }
             : persistent === false
                 ? { id: 'storage', level: 'error', message: `DATA_DIR (${config_1.DATA_DIR}) is outside the attached volume (${config_1.VOLUME_PATH}); sessions and tokens are lost on every deploy.` }
                 : { id: 'storage', level: 'warn', message: `No Railway volume detected. Unless ${config_1.DATA_DIR} is on a persistent disk, WhatsApp sessions and HighLevel tokens are lost on every redeploy.` },

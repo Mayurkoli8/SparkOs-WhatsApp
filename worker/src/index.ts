@@ -5,6 +5,7 @@ import {
   BUILD,
   COMMIT,
   DATA_DIR,
+  DATA_VOLUME,
   GHL_CLIENT_ID,
   GHL_CLIENT_SECRET,
   GHL_WEBHOOK_PUBLIC_KEY,
@@ -289,7 +290,7 @@ app.get('/diagnostics', (_req, res) => {
   const instances = Object.values(registry.instances);
   const locations = knownLocations();
   const relative = VOLUME_PATH ? path.relative(VOLUME_PATH, DATA_DIR) : null;
-  const persistent = relative === null ? null : !relative.startsWith('..') && !path.isAbsolute(relative);
+  const persistent = DATA_VOLUME ? true : relative === null ? null : !relative.startsWith('..') && !path.isAbsolute(relative);
   const keySource = getTokenKeySource();
   const problems = locations.map(l => [l, ghl.connectionProblem(l)] as const);
   const unlinkedLocations = problems.filter(([, p]) => p?.startsWith('HighLevel is not connected')).map(([l]) => l);
@@ -297,7 +298,7 @@ app.get('/diagnostics', (_req, res) => {
   const anyConnection = Object.keys(registry.ghl).length > 0 || Object.keys(registry.companies).length > 0;
   const checks: Check[] = [
     persistent === true
-      ? { id: 'storage', level: 'ok', message: `Data is stored on the attached volume (${DATA_DIR}).` }
+      ? { id: 'storage', level: 'ok', message: `Data is stored on ${DATA_VOLUME || 'the attached volume'} (${DATA_DIR}).` }
       : persistent === false
         ? { id: 'storage', level: 'error', message: `DATA_DIR (${DATA_DIR}) is outside the attached volume (${VOLUME_PATH}); sessions and tokens are lost on every deploy.` }
         : { id: 'storage', level: 'warn', message: `No Railway volume detected. Unless ${DATA_DIR} is on a persistent disk, WhatsApp sessions and HighLevel tokens are lost on every redeploy.` },

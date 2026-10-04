@@ -10,6 +10,7 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /app/data
+      DATA_VOLUME: the Docker volume worker-data
       PORT: "3001"
     volumes:
       - worker-data:/app/data

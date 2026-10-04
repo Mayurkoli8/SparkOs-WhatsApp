@@ -47,6 +47,22 @@ Check it: `curl https://<WORKER_DOMAIN>/health` should return `{"ok":true,...}`.
 
 To update after new commits: `git pull && docker compose up -d --build`.
 
+### Google Cloud shortcut
+
+`gce-startup.sh` does steps 1–3 by itself on a Compute Engine VM (swap, Docker, clone, `.env`, start) and uses `<ip>.sslip.io` as the hostname. This is how the current worker was created (project `sparkwa`):
+
+```bash
+gcloud services enable compute.googleapis.com
+gcloud compute firewall-rules create wa-bridge-allow-web --network=default --allow=tcp:80,tcp:443 --target-tags=wa-bridge
+gcloud compute instances create wa-bridge --zone=us-central1-a --machine-type=e2-micro \
+  --image-family=debian-12 --image-project=debian-cloud --boot-disk-size=30GB --boot-disk-type=pd-standard \
+  --tags=wa-bridge --metadata-from-file=startup-script=gce-startup.sh \
+  --metadata=internal-api-key=<same as Vercel WORKER_API_KEY>,ghl-client-id=<client id>,ghl-provider-id=<provider id>,inbound-type=Custom,token-refresh-url=https://<vercel-domain>/api/oauth/refresh
+gcloud compute instances get-serial-port-output wa-bridge --zone=us-central1-a | grep WA-BRIDGE   # waits for "READY https://…"
+```
+
+Every boot pulls the latest code and rebuilds, so `gcloud compute instances reset wa-bridge --zone=us-central1-a` deploys new commits. Use reset/reboot, not stop/start: stopping releases the ephemeral IP and the sslip.io hostname would change.
+
 ## 4. Switch the dashboard over
 
 1. On Railway, stop the worker service (two workers using the same WhatsApp login knock each other offline).

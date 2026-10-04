@@ -5,6 +5,8 @@ const env = process.env;
 export const PORT = Number(env.PORT || 3001);
 // Railway exposes the mount path of an attached volume; prefer it so sessions and tokens survive redeploys.
 export const VOLUME_PATH = env.RAILWAY_VOLUME_MOUNT_PATH || '';
+// Set by hosts that persist DATA_DIR some other way (the Docker kit sets it for its named volume).
+export const DATA_VOLUME = env.DATA_VOLUME || '';
 export const DATA_DIR = env.DATA_DIR || VOLUME_PATH || path.resolve(process.cwd(), 'data');
 export const INTERNAL_API_KEY = env.INTERNAL_API_KEY || '';
 
