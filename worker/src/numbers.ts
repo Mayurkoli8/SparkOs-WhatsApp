@@ -1,7 +1,48 @@
+import { COLD_MESSAGES_PER_CONTACT, NEW_CHATS_PER_DAY, WARMUP_DAYS, WARMUP_NEW_CHATS_PER_DAY } from './config';
+import type { NumberState, ProtectionPolicy } from './protection';
 import { registry, save, type InstanceRecord } from './store';
 
 // A sub-account's WhatsApp numbers: permanent slots (#1, #2…), exactly one default sender, and a size limit.
 export const DEFAULT_NUMBER_LIMIT = Number(process.env.NUMBERS_PER_SUBACCOUNT || 5);
+
+export type Policy = Required<ProtectionPolicy>;
+
+const setFields = <T extends object>(value: T | undefined) =>
+  Object.fromEntries(Object.entries(value ?? {}).filter(([, v]) => v !== undefined && v !== null)) as Partial<T>;
+
+// Protection settings resolve per field: the number's own override, else the admin default, else the environment.
+export function builtInPolicy(): Policy {
+  return {
+    enabled: true,
+    newChatsPerDay: NEW_CHATS_PER_DAY,
+    warmupDays: WARMUP_DAYS,
+    warmupNewChatsPerDay: WARMUP_NEW_CHATS_PER_DAY,
+    coldMessagesPerContact: COLD_MESSAGES_PER_CONTACT
+  };
+}
+
+export function defaultPolicy(): Policy {
+  return { ...builtInPolicy(), ...setFields(registry.settings.protectionDefaults) };
+}
+
+export function effectivePolicy(instance: InstanceRecord): Policy {
+  return { ...defaultPolicy(), ...setFields(instance.protection) };
+}
+
+// The user a contact should be assigned to after talking with this number, or null to leave the contact as it is.
+// Contacts that already belong to someone else are only taken over in "always" mode.
+export function assigneeFor(number: Pick<InstanceRecord, 'assignedUserId' | 'assignMode'>, currentAssignee: string | null | undefined) {
+  const wanted = number.assignedUserId;
+  if (!wanted || currentAssignee === wanted) return null;
+  if (currentAssignee && number.assignMode !== 'always') return null;
+  return wanted;
+}
+
+// Warm-up counts from the link date, or from the day the admin restarted it.
+export function numberState(instance: InstanceRecord): NumberState {
+  const from = instance.warmupFrom || instance.linkedAt;
+  return { linkedAt: from ? Date.parse(from) : null, restrictedUntil: instance.restrictedUntil ?? null };
+}
 
 const bySlot = (a: InstanceRecord, b: InstanceRecord) => (a.slot ?? Infinity) - (b.slot ?? Infinity) || a.createdAt.localeCompare(b.createdAt);
 
@@ -11,8 +52,12 @@ export function numbersOf(locationId: string) {
     .sort(bySlot);
 }
 
+export function defaultNumberLimit() {
+  return registry.settings.defaultNumberLimit ?? DEFAULT_NUMBER_LIMIT;
+}
+
 export function limitFor(locationId: string) {
-  return registry.settings.limits?.[locationId] ?? DEFAULT_NUMBER_LIMIT;
+  return registry.settings.limits?.[locationId] ?? defaultNumberLimit();
 }
 
 export async function setLimit(locationId: string, limit: number) {

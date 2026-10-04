@@ -1,82 +1,33 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { NumberControls } from './NumberControls';
+import { SettingsTab } from './SettingsTab';
+import {
+  call,
+  DOWN,
+  formatPhone,
+  protectionText,
+  STATUS_LABELS,
+  when,
+  type BridgeEvent,
+  type Location,
+  type NumberInfo,
+  type Overview,
+  type Policy,
+  type Run
+} from './shared';
+import { SystemPanel } from './SystemPanel';
 
-type Protection = { newChatsToday: number; newChatLimit: number; warmingUp: boolean; warmupDaysLeft: number; restricted: boolean };
-type NumberInfo = {
-  id: string;
-  name: string;
-  locationId: string;
-  status: string;
-  phone?: string;
-  qr?: string | null;
-  lastError?: string | null;
-  slot: number | null;
-  isDefault: boolean;
-  restrictedUntil: number | null;
-  protection: Protection;
-};
-type Location = { locationId: string; limit: number; ghl: { connected: boolean; problem: string | null }; numbers: NumberInfo[] };
-type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
-type BridgeEvent = { at: string; level: 'info' | 'warn' | 'error'; message: string; detail?: string };
-type Overview = {
-  urls: { callbackUrl: string; deliveryUrl: string; subaccountUrl: string };
-  checks: Check[];
-  worker: null | {
-    build: string;
-    commit: string | null;
-    startedAt: string;
-    providerId: string | null;
-    inboundType: string;
-    protection: { newChatsPerDay: number; warmupDays: number; warmupNewChatsPerDay: number; coldMessagesPerContact: number };
-    locations: Location[];
-    events: BridgeEvent[];
-  };
-};
-type Tab = 'overview' | 'subaccounts' | 'activity' | 'setup';
+type Tab = 'overview' | 'subaccounts' | 'activity' | 'settings' | 'setup';
 
-const STATUS_LABELS: Record<string, string> = {
-  connected: 'connected',
-  qr: 'scan QR',
-  starting: 'starting',
-  connecting: 'connecting',
-  reconnecting: 'reconnecting',
-  disconnected: 'disconnected',
-  logged_out: 'logged out',
-  qr_expired: 'QR expired',
-  conflict: 'conflict',
-  error: 'error'
-};
-const DOWN = new Set(['logged_out', 'qr_expired', 'disconnected', 'conflict', 'error']);
 const TABS: { id: Tab; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'subaccounts', label: 'Sub-accounts' },
   { id: 'activity', label: 'Activity' },
+  { id: 'settings', label: 'Settings' },
   { id: 'setup', label: 'Setup' }
 ];
-
-function formatPhone(digits?: string | null) {
-  if (!digits) return '';
-  if (digits.startsWith('91') && digits.length === 12) return `+91 ${digits.slice(2, 7)} ${digits.slice(7)}`;
-  return `+${digits}`;
-}
-
-const when = (ms: number | string) => new Date(ms).toLocaleString();
-
-function protectionText(n: NumberInfo) {
-  const p = n.protection;
-  if (p.restricted && n.restrictedUntil) return `Restricted by WhatsApp until ${when(n.restrictedUntil)}`;
-  const today = `${p.newChatsToday}/${p.newChatLimit} new chats today`;
-  return p.warmingUp ? `Warming up (${p.warmupDaysLeft} days left) · ${today}` : today;
-}
-
-async function call(url: string, method: string, body?: object) {
-  const res = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401) window.location.href = '/admin/login';
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data;
-}
 
 export default function AdminPage() {
   const [data, setData] = useState<Overview | null>(null);
@@ -120,14 +71,17 @@ export default function AdminPage() {
     window.history.replaceState(null, '', `#${next}`);
   }
 
-  async function run(action: () => Promise<unknown>) {
+  const run: Run = async action => {
     try {
-      await action();
+      const result = await action();
+      setError('');
       await refresh();
+      return result;
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Action failed');
+      return undefined;
     }
-  }
+  };
 
   async function logout() {
     await fetch('/api/admin/logout', { method: 'POST' });
@@ -235,6 +189,8 @@ export default function AdminPage() {
             )}
           </section>
 
+          <SystemPanel system={worker?.system} pending={worker?.pendingSync} run={run} />
+
           <section className="panel">
             <div className="panelhead">
               <h2>Latest activity</h2>
@@ -247,16 +203,18 @@ export default function AdminPage() {
         </>
       )}
 
-      {tab === 'subaccounts' && <SubAccounts locations={locations} run={run} />}
+      {tab === 'subaccounts' && worker && <SubAccounts locations={locations} defaults={worker.protection} run={run} />}
 
       {tab === 'activity' && <Activity events={worker?.events ?? []} />}
+
+      {tab === 'settings' && (worker?.settings ? <SettingsTab settings={worker.settings} run={run} /> : <div className="empty">The worker is not reachable, or runs an older build.</div>)}
 
       {tab === 'setup' && data && <Setup data={data} />}
     </main>
   );
 }
 
-function SubAccounts({ locations, run }: { locations: Location[]; run: (action: () => Promise<unknown>) => Promise<void> }) {
+function SubAccounts({ locations, defaults, run }: { locations: Location[]; defaults: Policy; run: Run }) {
   const [locationId, setLocationId] = useState('');
   const [name, setName] = useState('');
 
@@ -290,13 +248,13 @@ function SubAccounts({ locations, run }: { locations: Location[]; run: (action: 
       {locations.length === 0 && <div className="empty">No sub-accounts yet. Connect GHL, then add a number above or from the sub-account page.</div>}
 
       {locations.map(location => (
-        <LocationCard key={location.locationId} location={location} run={run} />
+        <LocationCard key={location.locationId} location={location} defaults={defaults} run={run} />
       ))}
     </>
   );
 }
 
-function LocationCard({ location, run }: { location: Location; run: (action: () => Promise<unknown>) => Promise<void> }) {
+function LocationCard({ location, defaults, run }: { location: Location; defaults: Policy; run: Run }) {
   const [editingLimit, setEditingLimit] = useState<string | null>(null);
   const { locationId, limit, ghl, numbers } = location;
 
@@ -337,7 +295,7 @@ function LocationCard({ location, run }: { location: Location; run: (action: () 
       ) : (
         <div className="numbers">
           {numbers.map(n => (
-            <NumberRow key={n.id} n={n} run={run} />
+            <NumberRow key={n.id} n={n} defaults={defaults} run={run} />
           ))}
         </div>
       )}
@@ -345,8 +303,9 @@ function LocationCard({ location, run }: { location: Location; run: (action: () 
   );
 }
 
-function NumberRow({ n, run }: { n: NumberInfo; run: (action: () => Promise<unknown>) => Promise<void> }) {
+function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run: Run }) {
   const [showQr, setShowQr] = useState(true);
+  const [managing, setManaging] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const url = `/api/instances/${encodeURIComponent(n.id)}`;
 
@@ -372,11 +331,15 @@ function NumberRow({ n, run }: { n: NumberInfo; run: (action: () => Promise<unkn
           <span className={`status ${n.status}`}>{STATUS_LABELS[n.status] || n.status}</span>
         </div>
         <div className="meta">
-          {formatPhone(n.phone) || 'not linked yet'} · <span className={n.protection.restricted ? 'warnText' : ''}>{protectionText(n)}</span>
+          {formatPhone(n.phone) || 'not linked yet'} · <span className={n.protection.restricted || !n.protection.enabled ? 'warnText' : ''}>{protectionText(n)}</span>
+          {n.assignedUserId && <> · owner {n.assignedUserName || n.assignedUserId}</>}
         </div>
         {n.lastError && DOWN.has(n.status) && <div className="lasterror">{n.lastError}</div>}
       </div>
       <div className="actions">
+        <button className={managing ? 'secondary small' : 'ghost small'} onClick={() => setManaging(!managing)}>
+          {managing ? 'Close' : 'Manage'}
+        </button>
         {n.status === 'qr' && (
           <button className="secondary small" onClick={() => setShowQr(!showQr)}>
             {showQr ? 'Hide QR' : 'Show QR'}
@@ -422,6 +385,7 @@ function NumberRow({ n, run }: { n: NumberInfo; run: (action: () => Promise<unkn
           )}
         </div>
       )}
+      {managing && <NumberControls n={n} defaults={defaults} run={run} />}
     </div>
   );
 }
@@ -497,8 +461,12 @@ function Setup({ data }: { data: Overview }) {
             Add the sub-account page in the agency under <b>Settings → Custom Menu Links</b> so each sub-account manages its own numbers.
           </li>
           <li>
-            Replies go out from the number in the contact’s <b>wa: +number</b> tag (set automatically when they write), else the default number.{' '}
-            <b>{'{WA#2}'}</b> or <b>{'{WA:Sales}'}</b> in a message picks a number explicitly.
+            Messages go out from the number in the contact’s <b>wa: +number</b> tag (set automatically when they write or are first messaged), else the number
+            whose owner the contact is assigned to, else the sender’s own number, else the default. <b>{'{WA#2}'}</b> or <b>{'{WA:Sales}'}</b> in a message
+            picks a number explicitly.
+          </li>
+          <li>
+            To pick contact owners from a list, the Marketplace app needs the <b>users.readonly</b> scope (then click Connect GHL again).
           </li>
         </ul>
       </section>
@@ -511,6 +479,11 @@ function Setup({ data }: { data: Overview }) {
           </div>
           <ul className="steps">
             <li>People who wrote to a number first can always be answered from it.</li>
+            {!worker.protection.enabled && (
+              <li>
+                <b>Protection is switched off by default</b>; only numbers with their own settings are limited.
+              </li>
+            )}
             <li>
               At most <b>{worker.protection.newChatsPerDay}</b> new conversations per day with people who never wrote (
               <b>{worker.protection.warmupNewChatsPerDay}</b> during the first <b>{worker.protection.warmupDays}</b> days after linking).
@@ -520,6 +493,10 @@ function Setup({ data }: { data: Overview }) {
             </li>
             <li>When WhatsApp restricts a number it stops starting new chats until the restriction ends; that outreach is never moved to your other numbers.</li>
             <li>Messages are sent with a typing indicator, human-like pauses, and the contact’s messages marked as read first.</li>
+            <li>
+              Change these defaults on the <b>Settings</b> tab, or per number under <b>Sub-accounts → Manage</b>: skip or restart a warm-up, turn protection
+              off, or set other limits.
+            </li>
           </ul>
         </section>
       )}

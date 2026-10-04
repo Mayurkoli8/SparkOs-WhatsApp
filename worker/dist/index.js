@@ -37,13 +37,17 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const node_crypto_1 = __importDefault(require("node:crypto"));
+const promises_1 = __importDefault(require("node:fs/promises"));
+const node_os_1 = __importDefault(require("node:os"));
 const node_path_1 = __importDefault(require("node:path"));
 const express_1 = __importDefault(require("express"));
 const config_1 = require("./config");
+const alerts_1 = require("./alerts");
 const events_1 = require("./events");
 const ghl = __importStar(require("./ghl"));
 const bridge = __importStar(require("./bridge"));
 const numbers_1 = require("./numbers");
+const settings_1 = require("./settings");
 const store_1 = require("./store");
 const signature_1 = require("./signature");
 const startedAt = new Date().toISOString();
@@ -74,7 +78,8 @@ app.use((req, res, next) => {
 });
 const publicInstance = (instance) => {
     const { id, name, locationId, status, phone, createdAt, updatedAt, qr, lastError, slot, isDefault, linkedAt } = instance;
-    const protection = bridge.protection.stats(id, bridge.numberState(instance), Date.now());
+    const policy = (0, numbers_1.effectivePolicy)(instance);
+    const protection = bridge.protection.stats(id, (0, numbers_1.numberState)(instance), Date.now(), policy);
     return {
         id,
         name,
@@ -90,6 +95,13 @@ const publicInstance = (instance) => {
         linkedAt: linkedAt || null,
         restrictedUntil: protection.restricted ? instance.restrictedUntil : null,
         protection,
+        // The rules in force for this number, and which of them the admin set for it (the rest follow the defaults).
+        policy,
+        overrides: instance.protection ?? {},
+        warmupFrom: instance.warmupFrom ?? null,
+        assignedUserId: instance.assignedUserId ?? null,
+        assignedUserName: instance.assignedUserName ?? null,
+        assignMode: instance.assignMode ?? 'unassigned',
         ghlConnected: ghl.isConnected(locationId)
     };
 };
@@ -149,18 +161,89 @@ app.get('/instances/:id', (req, res) => {
         return res.status(404).json({ error: 'Not found' });
     res.json({ instance: publicInstance(instance) });
 });
-// Rename a number or make it the sub-account's default sender.
+const USER_ID = /^[A-Za-z0-9_-]{1,64}$/;
+// Everything the admin can change on one number. All input is validated before anything is applied; `described`
+// lists the changes in plain words for the activity log.
+function parseNumberPatch(instance, body) {
+    const changes = {};
+    const described = [];
+    if (typeof body.name === 'string' && body.name.trim())
+        changes.name = body.name.trim().slice(0, 40);
+    if (body.protection !== undefined) {
+        const policyPatch = (0, settings_1.parsePolicyPatch)(body.protection);
+        changes.protection = (0, settings_1.applyPolicyPatch)(instance.protection, policyPatch);
+        described.push(...(0, settings_1.describePolicyPatch)(policyPatch));
+    }
+    if (body.assignedUserId !== undefined) {
+        const userId = typeof body.assignedUserId === 'string' ? body.assignedUserId.trim() : body.assignedUserId;
+        if (userId === null || userId === '') {
+            changes.assignedUserId = null;
+            changes.assignedUserName = null;
+        }
+        else if (typeof userId === 'string' && USER_ID.test(userId)) {
+            changes.assignedUserId = userId;
+            changes.assignedUserName = typeof body.assignedUserName === 'string' ? body.assignedUserName.trim().slice(0, 80) || null : null;
+        }
+        else {
+            throw new settings_1.InputError('assignedUserId must be a HighLevel user id');
+        }
+        if (changes.assignedUserId !== (instance.assignedUserId ?? null)) {
+            described.push(changes.assignedUserId ? `contact owner ${changes.assignedUserName || changes.assignedUserId}` : 'no contact owner');
+        }
+    }
+    if (body.assignMode !== undefined) {
+        if (body.assignMode !== 'unassigned' && body.assignMode !== 'always')
+            throw new settings_1.InputError('assignMode must be "unassigned" or "always"');
+        changes.assignMode = body.assignMode;
+        if (body.assignMode !== (instance.assignMode ?? 'unassigned')) {
+            described.push(body.assignMode === 'always' ? 'assigns every contact' : 'assigns only contacts without an owner');
+        }
+    }
+    if (body.warmup !== undefined) {
+        if (body.warmup !== 'restart')
+            throw new settings_1.InputError('warmup must be "restart"');
+        changes.warmupFrom = new Date().toISOString();
+        // Restarting means warming up again, so a "no warm-up" override on this number goes.
+        const own = changes.protection !== undefined ? changes.protection : instance.protection;
+        if (own?.warmupDays === 0)
+            changes.protection = (0, settings_1.applyPolicyPatch)(own, { warmupDays: null });
+        described.push('warm-up restarted');
+    }
+    return { changes, described };
+}
+// Rename a number, make it the default sender, set its owner and protection rules, restart its warm-up, or clear a
+// restriction (which asks WhatsApp again).
 app.patch('/instances/:id', async (req, res) => {
     const instance = store_1.registry.instances[req.params.id];
     if (!instance)
         return res.status(404).json({ error: 'Not found' });
-    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 40) : undefined;
-    if (name)
-        instance.name = name;
-    if (req.body?.isDefault === true)
+    const body = (req.body ?? {});
+    let changes;
+    let described;
+    try {
+        ({ changes, described } = parseNumberPatch(instance, body));
+    }
+    catch (err) {
+        if (err instanceof settings_1.InputError)
+            return res.status(400).json({ error: err.message });
+        return sendError(res, err);
+    }
+    const { protection, ...rest } = changes;
+    Object.assign(instance, rest, { updatedAt: new Date().toISOString() });
+    if ('protection' in changes) {
+        if (protection)
+            instance.protection = protection;
+        else
+            delete instance.protection;
+    }
+    if (body.isDefault === true)
         (0, numbers_1.setDefault)(instance.id);
     await (0, store_1.save)();
-    res.json({ instance: publicInstance(store_1.registry.instances[instance.id]) });
+    if (described.length) {
+        (0, events_1.recordEvent)('info', `Admin changed #${instance.slot} ${instance.name}: ${described.join(', ')}`, { instanceId: instance.id, locationId: instance.locationId });
+    }
+    const restriction = body.clearRestriction === true ? await bridge.recheckRestriction(instance.id) : undefined;
+    res.json({ instance: publicInstance(store_1.registry.instances[instance.id]), restriction });
 });
 // One sub-account's numbers, limit and HighLevel readiness (what the sub-account page needs).
 app.get('/locations/:locationId', (req, res) => {
@@ -172,6 +255,59 @@ app.get('/locations/:locationId', (req, res) => {
         numbers: (0, numbers_1.numbersOf)(locationId).map(publicInstance)
     });
 });
+// The HighLevel users of a sub-account, for assigning numbers to them. Needs the users.readonly scope.
+const usersCache = new Map();
+app.get('/locations/:locationId/users', async (req, res) => {
+    const { locationId } = req.params;
+    if (!ghl.isConnected(locationId))
+        return res.json({ users: [], error: 'This sub-account is not connected to HighLevel.' });
+    const cached = usersCache.get(locationId);
+    if (cached && Date.now() - cached.at < 5 * 60_000 && req.query.refresh !== '1')
+        return res.json({ users: cached.users });
+    try {
+        const users = await ghl.listUsers(locationId);
+        usersCache.set(locationId, { at: Date.now(), users });
+        res.json({ users });
+    }
+    catch (err) {
+        const denied = err instanceof ghl.GhlApiError && (err.status === 401 || err.status === 403);
+        res.json({
+            users: [],
+            needsScope: denied,
+            error: denied
+                ? 'HighLevel did not allow reading this sub-account\'s users. Add the users.readonly scope to the Marketplace app (Advanced Settings → Auth → Scopes), then click "Connect GHL" again. Until then you can paste a user ID.'
+                : (0, events_1.errorText)(err)
+        });
+    }
+});
+app.get('/settings', (_req, res) => res.json((0, settings_1.settingsView)()));
+app.put('/settings', async (req, res) => {
+    let patch;
+    try {
+        patch = (0, settings_1.parseSettingsPatch)(req.body);
+        await (0, settings_1.updateSettings)(patch);
+    }
+    catch (err) {
+        if (err instanceof settings_1.InputError)
+            return res.status(400).json({ error: err.message });
+        return sendError(res, err);
+    }
+    const described = (0, settings_1.describeSettingsPatch)(patch);
+    if (described)
+        (0, events_1.recordEvent)('info', `Admin changed the settings: ${described}`);
+    res.json((0, settings_1.settingsView)());
+});
+app.post('/settings/test-alert', async (_req, res) => {
+    try {
+        await (0, alerts_1.sendTestAlert)();
+        res.json({ ok: true });
+    }
+    catch (err) {
+        sendError(res, err, 400);
+    }
+});
+app.get('/sync/pending', (_req, res) => res.json(bridge.pendingSyncSummary()));
+app.post('/sync/retry', (_req, res) => res.json({ ok: true, retrying: bridge.retryPendingNow() }));
 app.put('/locations/:locationId/limit', async (req, res) => {
     const limit = Number(req.body?.limit);
     if (!Number.isInteger(limit) || limit < 0 || limit > 100)
@@ -352,8 +488,43 @@ app.post(WEBHOOK_PATHS, express_1.default.raw({ type: () => true, limit: '2mb' }
     bridge.handleProviderOutbound(payload);
     res.json({ success: true, messageId: payload.messageId ?? null });
 });
+// Disk space and usable memory are read once a minute rather than on every dashboard poll.
+let disk = null;
+let availableMemory = node_os_1.default.freemem();
+async function refreshResources() {
+    try {
+        const stats = await promises_1.default.statfs(config_1.DATA_DIR);
+        disk = { freeBytes: stats.bavail * stats.bsize, totalBytes: stats.blocks * stats.bsize };
+    }
+    catch {
+        disk = null;
+    }
+    // On Linux os.freemem() leaves out the file cache the kernel frees on demand; MemAvailable is what can be used.
+    try {
+        const match = /^MemAvailable:\s+(\d+) kB/m.exec(await promises_1.default.readFile('/proc/meminfo', 'utf8'));
+        availableMemory = match ? Number(match[1]) * 1024 : node_os_1.default.freemem();
+    }
+    catch {
+        availableMemory = node_os_1.default.freemem();
+    }
+}
+function systemInfo() {
+    const memory = process.memoryUsage();
+    return {
+        uptimeSeconds: Math.round(process.uptime()),
+        node: process.version,
+        memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed },
+        host: { totalMemBytes: node_os_1.default.totalmem(), freeMemBytes: availableMemory, load: node_os_1.default.loadavg(), cpus: node_os_1.default.cpus().length },
+        disk,
+        sessions: bridge.sessionCounts()
+    };
+}
+const GB = 1024 ** 3;
+const MB = 1024 ** 2;
+const memoryLow = () => availableMemory < 100 * MB || availableMemory / node_os_1.default.totalmem() < 0.05;
 function diagnostics() {
     const instances = Object.values(store_1.registry.instances);
+    const pending = bridge.pendingSyncSummary();
     const locations = knownLocations();
     const relative = config_1.VOLUME_PATH ? node_path_1.default.relative(config_1.VOLUME_PATH, config_1.DATA_DIR) : null;
     const persistent = config_1.DATA_VOLUME ? true : relative === null ? null : !relative.startsWith('..') && !node_path_1.default.isAbsolute(relative);
@@ -407,7 +578,19 @@ function diagnostics() {
             : { id: 'location-match', level: 'ok', message: 'Every instance belongs to a connected HighLevel location.' },
         instances.some(i => bridge.isLive(i.id))
             ? { id: 'whatsapp', level: 'ok', message: 'At least one WhatsApp number is connected.' }
-            : { id: 'whatsapp', level: 'error', message: 'No WhatsApp number is connected. Create or reconnect an instance and scan the QR code.' }
+            : { id: 'whatsapp', level: 'error', message: 'No WhatsApp number is connected. Create or reconnect an instance and scan the QR code.' },
+        pending.count
+            ? {
+                id: 'sync-queue',
+                level: 'warn',
+                message: `${pending.count} WhatsApp message${pending.count === 1 ? ' is' : 's are'} waiting to be synced into HighLevel (oldest since ${pending.oldestAt}). They are retried automatically.`
+            }
+            : { id: 'sync-queue', level: 'ok', message: 'No WhatsApp messages are waiting to be synced.' },
+        disk && disk.freeBytes < GB
+            ? { id: 'disk', level: disk.freeBytes < GB / 4 ? 'error' : 'warn', message: `Only ${(disk.freeBytes / GB).toFixed(1)} GB of disk space is left on the worker.` }
+            : memoryLow()
+                ? { id: 'memory', level: 'warn', message: `The worker's machine is low on memory (${Math.round(availableMemory / MB)} MB available).` }
+                : { id: 'resources', level: 'ok', message: 'The worker has enough disk space and memory.' }
     ];
     return {
         build: config_1.BUILD,
@@ -436,12 +619,10 @@ app.get('/admin/overview', (_req, res) => {
         startedAt,
         providerId,
         inboundType,
-        protection: {
-            newChatsPerDay: config_1.NEW_CHATS_PER_DAY,
-            warmupDays: config_1.WARMUP_DAYS,
-            warmupNewChatsPerDay: config_1.WARMUP_NEW_CHATS_PER_DAY,
-            coldMessagesPerContact: config_1.COLD_MESSAGES_PER_CONTACT
-        },
+        protection: (0, numbers_1.defaultPolicy)(),
+        settings: (0, settings_1.settingsView)(),
+        system: systemInfo(),
+        pendingSync: bridge.pendingSyncSummary(),
         checks,
         locations: locationIds.map(locationId => ({
             locationId,
@@ -463,11 +644,16 @@ async function main() {
     if ((0, numbers_1.assignSlotsAndDefaults)())
         await (0, store_1.save)();
     await bridge.loadProtection();
+    await bridge.loadPendingSync();
+    await refreshResources();
+    setInterval(() => void refreshResources(), 60_000).unref();
+    (0, alerts_1.startAlerts)();
     const moved = await ghl.migrateAgencyTokens();
     if (moved.length)
         (0, events_1.recordEvent)('warn', `Found agency (Company) tokens stored as sub-account tokens; moved them to agency connections: ${moved.join(', ')}`);
     const server = app.listen(config_1.PORT, '0.0.0.0', () => events_1.log.info({ port: config_1.PORT, dataDir: config_1.DATA_DIR }, 'Worker listening'));
     await bridge.resumeInstances();
+    bridge.startBackgroundJobs();
     // Agency installs: get a sub-account token for every instance location up front so problems show immediately.
     for (const locationId of new Set(Object.values(store_1.registry.instances).map(i => i.locationId))) {
         if (store_1.registry.ghl[locationId]?.source === 'direct')
@@ -481,6 +667,7 @@ async function main() {
         bridge.shutdown();
         await (0, store_1.save)();
         await bridge.flushProtection();
+        await bridge.flushPendingSync();
         await (0, events_1.flushEvents)();
         server.close();
         setTimeout(() => process.exit(0), 1500).unref();

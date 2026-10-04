@@ -37,5 +37,5 @@ exports.WARMUP_NEW_CHATS_PER_DAY = num(env.WARMUP_NEW_CHATS_PER_DAY, 10);
 exports.COLD_MESSAGES_PER_CONTACT = num(env.COLD_MESSAGES_PER_CONTACT, 3);
 // How long a message waits for its number to reconnect before a backup number sends it.
 exports.FAILOVER_WAIT_MS = num(env.FAILOVER_WAIT_SECONDS, 60) * 1000;
-exports.BUILD = '2026-10-04.1';
+exports.BUILD = '2026-10-05.1';
 exports.COMMIT = (env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7);

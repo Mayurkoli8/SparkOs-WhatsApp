@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   attachmentKind,
+  deserializeMessage,
   extractContent,
   ghlStatusFromWa,
   isDirectChatJid,
   mediaLabel,
+  serializeMessage,
   resolvePhone,
   shouldAdvanceStatus
 } from '../src/wa-message';
@@ -121,4 +123,23 @@ test('attachmentKind picks a WhatsApp media type from the URL or content type', 
   assert.equal(attachmentKind('https://cdn.x/file.pdf'), 'document');
   assert.equal(attachmentKind('https://cdn.x/download', 'image/png'), 'image');
   assert.equal(attachmentKind('https://cdn.x/download'), 'document');
+});
+
+test('messages survive the retry queue on disk: keys, bytes and 64-bit sizes, without thumbnails', () => {
+  const fileLength = { low: 2048, high: 0, unsigned: true, toNumber: () => 2048 };
+  const msg = {
+    key: { id: 'WA1', remoteJid: '123@lid', fromMe: false, remoteJidAlt: '919876543210@s.whatsapp.net' },
+    pushName: 'Asha',
+    message: { imageMessage: { mimetype: 'image/jpeg', mediaKey: Buffer.from([1, 2, 3]), fileLength, jpegThumbnail: Buffer.alloc(5000), caption: 'hi' } }
+  };
+  const raw = serializeMessage(msg as never);
+  assert.ok(raw.length < 1000, 'the thumbnail is not stored');
+  const copy = deserializeMessage(raw);
+  assert.deepEqual(copy.key, msg.key);
+  assert.deepEqual(copy.pushName, 'Asha');
+  const image = copy.message!.imageMessage!;
+  assert.ok(Buffer.isBuffer(image.mediaKey));
+  assert.deepEqual([...image.mediaKey!], [1, 2, 3]);
+  assert.equal(image.jpegThumbnail, undefined);
+  assert.deepEqual(extractContent(copy.message!), { text: 'hi', media: { kind: 'image', mimetype: 'image/jpeg', fileName: undefined, size: 2048, voiceNote: false } });
 });

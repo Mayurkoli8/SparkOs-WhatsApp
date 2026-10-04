@@ -1,12 +1,20 @@
 # Worker + Caddy (automatic HTTPS from Let's Encrypt). Run from this folder:
 #   cp .env.example .env   # fill it in
 #   docker compose up -d --build
+# Logs rotate at 10 MB (3 files kept) so months of message logs can never fill the disk.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   worker:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     restart: unless-stopped
+    logging: *logging
     env_file: .env
     environment:
       DATA_DIR: /app/data
@@ -20,6 +28,7 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging: *logging
     depends_on:
       - worker
     ports:

@@ -76,6 +76,41 @@ test('the book survives a save and load', () => {
   assert.equal(copy.stats('n1', established, T0).newChatsToday, 1);
 });
 
+test('a per-number policy overrides the defaults', () => {
+  const book = new ProtectionBook(policy);
+  const fresh = { linkedAt: T0 - 2 * DAY, restrictedUntil: null };
+  book.recordSend('n1', 'a', T0);
+  const noWarmup = { ...policy, warmupDays: 0 };
+  assert.equal(book.check('n1', 'b', fresh, T0, noWarmup).allowed, true, 'warm-up switched off for this number');
+  assert.equal(book.stats('n1', fresh, T0, noWarmup).warmingUp, false);
+  assert.equal(book.stats('n1', fresh, T0, { ...policy, warmupDays: 1 }).warmingUp, false, 'a 1-day warm-up is over after 2 days');
+  assert.equal(book.stats('n1', fresh, T0, { ...policy, warmupDays: 14 }).warmupDaysLeft, 12);
+});
+
+test('switching protection off lifts the limits but a WhatsApp restriction still pauses new chats', () => {
+  const book = new ProtectionBook(policy);
+  const off = { ...policy, enabled: false };
+  for (const c of ['a', 'b', 'c', 'd', 'e']) {
+    for (let i = 0; i < 3; i++) {
+      assert.equal(book.check('n1', c, established, T0, off).allowed, true);
+      book.recordSend('n1', c, T0);
+    }
+  }
+  const stats = book.stats('n1', established, T0, off);
+  assert.deepEqual([stats.enabled, stats.newChatsToday, stats.newChatLimit], [false, 5, null], 'sends are still counted');
+  const restricted = { linkedAt: T0 - 30 * DAY, restrictedUntil: T0 + DAY };
+  assert.equal(book.check('n1', 'z', restricted, T0, off).allowed, false, 'WhatsApp would refuse it and extend the restriction');
+});
+
+test('warm-up progress is reported day by day', () => {
+  const book = new ProtectionBook(policy);
+  const linked = { linkedAt: T0 - 2.5 * DAY, restrictedUntil: null };
+  const stats = book.stats('n1', linked, T0);
+  assert.deepEqual([stats.warmingUp, stats.warmupDay, stats.warmupDays, stats.warmupDaysLeft], [true, 3, 7, 5]);
+  assert.equal(stats.warmupEndsAt, linked.linkedAt + 7 * DAY);
+  assert.equal(book.stats('n1', { linkedAt: null, restrictedUntil: null }, T0).warmingUp, false, 'not linked yet');
+});
+
 test('typing delay grows with the message but stays human-sized', () => {
   assert.ok(typingDelayMs('ok', () => 0) >= 800);
   assert.ok(typingDelayMs('x'.repeat(5000), () => 0.99) <= 6000);

@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isPublicAddress = isPublicAddress;
 exports.downloadPublicFile = downloadPublicFile;
+exports.postPublicJson = postPublicJson;
 const node_dns_1 = __importDefault(require("node:dns"));
 const node_https_1 = __importDefault(require("node:https"));
 const node_net_1 = __importDefault(require("node:net"));
@@ -106,5 +107,39 @@ async function downloadPublicFile(rawUrl, maxBytes, redirectsLeft = 3) {
         });
         req.on('timeout', () => req.destroy(new Error('Attachment download timed out')));
         req.on('error', reject);
+    });
+}
+// POST a small JSON body to a public HTTPS URL (the admin's alert webhook), with the same address checks as downloads.
+function postPublicJson(rawUrl, body) {
+    let url;
+    try {
+        url = new URL(rawUrl);
+    }
+    catch {
+        return Promise.reject(new Error('Invalid webhook URL'));
+    }
+    if (url.protocol !== 'https:')
+        return Promise.reject(new Error('Only https webhook URLs are allowed'));
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    if (node_net_1.default.isIP(host) && !isPublicAddress(host))
+        return Promise.reject(new Error(`Refusing to call ${host}: it is a private address`));
+    const data = Buffer.from(JSON.stringify(body));
+    return new Promise((resolve, reject) => {
+        const req = node_https_1.default.request(url, {
+            method: 'POST',
+            lookup: publicOnlyLookup,
+            timeout: 15_000,
+            headers: { 'content-type': 'application/json', 'content-length': data.length, 'user-agent': 'ghl-whatsapp-bridge' }
+        }, res => {
+            res.resume();
+            const status = res.statusCode || 0;
+            if (status >= 200 && status < 300)
+                resolve(status);
+            else
+                reject(new Error(`Webhook answered HTTP ${status}`));
+        });
+        req.on('timeout', () => req.destroy(new Error('Webhook timed out')));
+        req.on('error', reject);
+        req.end(data);
     });
 }

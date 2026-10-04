@@ -21,6 +21,11 @@ const MAX_EVENTS = 300;
 const EVENTS_FILE = path.join(DATA_DIR, 'events.json');
 let events: BridgeEvent[] = [];
 let saveTimer: NodeJS.Timeout | null = null;
+const listeners: ((event: BridgeEvent) => void)[] = [];
+
+export function onEvent(listener: (event: BridgeEvent) => void) {
+  listeners.push(listener);
+}
 
 export function recordEvent(level: EventLevel, message: string, context: Omit<BridgeEvent, 'at' | 'level' | 'message'> = {}) {
   const event: BridgeEvent = { at: new Date().toISOString(), level, message, ...context };
@@ -29,6 +34,13 @@ export function recordEvent(level: EventLevel, message: string, context: Omit<Br
   if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
   log[level](context, message);
   scheduleSave();
+  for (const listener of listeners) {
+    try {
+      listener(event);
+    } catch (err) {
+      log.warn({ err }, 'event listener failed');
+    }
+  }
 }
 
 export function recentEvents(limit = 100) {

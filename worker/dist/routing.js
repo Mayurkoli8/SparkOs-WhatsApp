@@ -1,6 +1,7 @@
 "use strict";
 // Which of a sub-account's WhatsApp numbers sends an outgoing message:
 // a {WA#2} / {WA:Sales} / {WA:+91…} token in the message, then the contact's "wa: +number" tag,
+// then the number of the HighLevel user the contact is assigned to, then the number of the user who sent it,
 // then the sub-account's default number, then the remaining numbers by slot.
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.parseRouteToken = parseRouteToken;
@@ -50,14 +51,13 @@ function matches(number, token) {
 function routeCandidates(numbers, opts) {
     const bySlot = [...numbers].sort((a, b) => a.slot - b.slot);
     const fallback = [...bySlot.filter(n => n.isDefault), ...bySlot.filter(n => !n.isDefault)];
+    const ownedBy = (userId) => (userId ? fallback.find(n => n.assignedUserId === userId) : undefined);
     let preferred;
     if (opts.token) {
         preferred = bySlot.find(n => matches(n, opts.token));
         if (!preferred)
             throw new Error(`No WhatsApp number ${describe(opts.token)} in this sub-account`);
     }
-    else if (opts.taggedPhone) {
-        preferred = bySlot.find(n => n.phone === opts.taggedPhone);
-    }
+    preferred ??= (opts.taggedPhone ? bySlot.find(n => n.phone === opts.taggedPhone) : undefined) ?? ownedBy(opts.assignedUserId) ?? ownedBy(opts.senderUserId);
     return preferred ? [preferred, ...fallback.filter(n => n !== preferred)] : fallback;
 }

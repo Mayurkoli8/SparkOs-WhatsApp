@@ -1,8 +1,10 @@
 // Which of a sub-account's WhatsApp numbers sends an outgoing message:
 // a {WA#2} / {WA:Sales} / {WA:+91…} token in the message, then the contact's "wa: +number" tag,
+// then the number of the HighLevel user the contact is assigned to, then the number of the user who sent it,
 // then the sub-account's default number, then the remaining numbers by slot.
 
-export type RouteNumber = { id: string; slot: number; name: string; phone?: string | null; isDefault: boolean };
+export type RouteNumber = { id: string; slot: number; name: string; phone?: string | null; isDefault: boolean; assignedUserId?: string | null };
+export type RouteHints = { token?: RouteToken | null; taggedPhone?: string | null; assignedUserId?: string | null; senderUserId?: string | null };
 export type RouteToken = { kind: 'slot' | 'name' | 'phone'; value: string };
 
 const TOKEN = /\{\s*wa\s*(?:#\s*(\d+)|:\s*([^}]+?))\s*\}/i;
@@ -46,15 +48,15 @@ function matches(number: RouteNumber, token: RouteToken) {
 }
 
 // Ordered candidates: the preferred number first, then the default, then the rest by slot.
-export function routeCandidates(numbers: RouteNumber[], opts: { token?: RouteToken | null; taggedPhone?: string | null }) {
+export function routeCandidates<T extends RouteNumber>(numbers: T[], opts: RouteHints): T[] {
   const bySlot = [...numbers].sort((a, b) => a.slot - b.slot);
   const fallback = [...bySlot.filter(n => n.isDefault), ...bySlot.filter(n => !n.isDefault)];
-  let preferred: RouteNumber | undefined;
+  const ownedBy = (userId?: string | null) => (userId ? fallback.find(n => n.assignedUserId === userId) : undefined);
+  let preferred: T | undefined;
   if (opts.token) {
     preferred = bySlot.find(n => matches(n, opts.token!));
     if (!preferred) throw new Error(`No WhatsApp number ${describe(opts.token)} in this sub-account`);
-  } else if (opts.taggedPhone) {
-    preferred = bySlot.find(n => n.phone === opts.taggedPhone);
   }
+  preferred ??= (opts.taggedPhone ? bySlot.find(n => n.phone === opts.taggedPhone) : undefined) ?? ownedBy(opts.assignedUserId) ?? ownedBy(opts.senderUserId);
   return preferred ? [preferred, ...fallback.filter(n => n !== preferred)] : fallback;
 }

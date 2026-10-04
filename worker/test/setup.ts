@@ -13,7 +13,8 @@ Object.assign(process.env, {
   GHL_CLIENT_ID: 'client-id',
   GHL_CLIENT_SECRET: 'client-secret',
   TOKEN_ENCRYPTION_KEY: 'not-a-32-byte-base64-key',
-  INTERNAL_API_KEY: 'internal-key'
+  INTERNAL_API_KEY: 'internal-key',
+  GHL_RETRY_BASE_MS: '1'
 });
 delete process.env.GHL_VERSION;
 delete process.env.RAILWAY_VOLUME_MOUNT_PATH;

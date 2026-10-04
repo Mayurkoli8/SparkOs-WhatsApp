@@ -28,25 +28,30 @@ class ProtectionBook {
     isWarm(numberId, contact) {
         return Boolean(this.numbers.get(numberId)?.get(contact)?.inboundAt);
     }
-    warmingUp(state, now) {
-        return Boolean(state.linkedAt && this.policy.warmupDays > 0 && now - state.linkedAt < this.policy.warmupDays * DAY);
-    }
-    stats(numberId, state, now) {
-        const warmingUp = this.warmingUp(state, now);
+    // Callers pass the number's own policy (admin overrides); the constructor's policy is the fallback.
+    stats(numberId, state, now, policy = this.policy) {
+        const enabled = policy.enabled !== false;
+        const warmupEndsAt = state.linkedAt && policy.warmupDays > 0 ? state.linkedAt + policy.warmupDays * DAY : null;
+        const warmingUp = enabled && warmupEndsAt !== null && now < warmupEndsAt;
         let newChatsToday = 0;
         for (const record of this.numbers.get(numberId)?.values() ?? []) {
             if (record.startedAt && now - record.startedAt < DAY)
                 newChatsToday++;
         }
         return {
+            enabled,
             newChatsToday,
-            newChatLimit: warmingUp ? this.policy.warmupNewChatsPerDay : this.policy.newChatsPerDay,
+            // null: no limit (protection is off for this number).
+            newChatLimit: enabled ? (warmingUp ? policy.warmupNewChatsPerDay : policy.newChatsPerDay) : null,
             warmingUp,
-            warmupDaysLeft: warmingUp ? Math.ceil((this.policy.warmupDays * DAY - (now - state.linkedAt)) / DAY) : 0,
+            warmupDays: policy.warmupDays,
+            warmupDay: warmingUp ? Math.floor((now - state.linkedAt) / DAY) + 1 : null,
+            warmupDaysLeft: warmingUp ? Math.ceil((warmupEndsAt - now) / DAY) : 0,
+            warmupEndsAt: warmingUp ? warmupEndsAt : null,
             restricted: Boolean(state.restrictedUntil && now < state.restrictedUntil)
         };
     }
-    check(numberId, contact, state, now) {
+    check(numberId, contact, state, now, policy = this.policy) {
         if (this.isWarm(numberId, contact))
             return { allowed: true };
         if (state.restrictedUntil && now < state.restrictedUntil) {
@@ -55,14 +60,16 @@ class ProtectionBook {
                 reason: `this number is restricted by WhatsApp from starting new chats until ${new Date(state.restrictedUntil).toISOString()}. Chats with people who wrote first still work.`
             };
         }
+        if (policy.enabled === false)
+            return { allowed: true };
         const record = this.numbers.get(numberId)?.get(contact);
-        if ((record?.coldSends ?? 0) >= this.policy.coldMessagesPerContact) {
-            return { allowed: false, reason: `this contact has not replied to the last ${this.policy.coldMessagesPerContact} messages; wait for a reply before sending more.` };
+        if ((record?.coldSends ?? 0) >= policy.coldMessagesPerContact) {
+            return { allowed: false, reason: `this contact has not replied to the last ${policy.coldMessagesPerContact} messages; wait for a reply before sending more.` };
         }
         if (record?.startedAt && now - record.startedAt < DAY)
             return { allowed: true };
-        const { newChatsToday, newChatLimit, warmingUp } = this.stats(numberId, state, now);
-        if (newChatsToday >= newChatLimit) {
+        const { newChatsToday, newChatLimit, warmingUp } = this.stats(numberId, state, now, policy);
+        if (newChatLimit !== null && newChatsToday >= newChatLimit) {
             return {
                 allowed: false,
                 reason: warmingUp

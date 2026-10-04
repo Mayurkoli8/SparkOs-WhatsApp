@@ -98,3 +98,37 @@ export async function downloadPublicFile(rawUrl: string, maxBytes: number, redir
     req.on('error', reject);
   });
 }
+
+// POST a small JSON body to a public HTTPS URL (the admin's alert webhook), with the same address checks as downloads.
+export function postPublicJson(rawUrl: string, body: unknown): Promise<number> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return Promise.reject(new Error('Invalid webhook URL'));
+  }
+  if (url.protocol !== 'https:') return Promise.reject(new Error('Only https webhook URLs are allowed'));
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host) && !isPublicAddress(host)) return Promise.reject(new Error(`Refusing to call ${host}: it is a private address`));
+  const data = Buffer.from(JSON.stringify(body));
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      url,
+      {
+        method: 'POST',
+        lookup: publicOnlyLookup as never,
+        timeout: 15_000,
+        headers: { 'content-type': 'application/json', 'content-length': data.length, 'user-agent': 'ghl-whatsapp-bridge' }
+      },
+      res => {
+        res.resume();
+        const status = res.statusCode || 0;
+        if (status >= 200 && status < 300) resolve(status);
+        else reject(new Error(`Webhook answered HTTP ${status}`));
+      }
+    );
+    req.on('timeout', () => req.destroy(new Error('Webhook timed out')));
+    req.on('error', reject);
+    req.end(data);
+  });
+}

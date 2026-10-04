@@ -8,6 +8,8 @@ exports.ghlStatusFromWa = ghlStatusFromWa;
 exports.shouldAdvanceStatus = shouldAdvanceStatus;
 exports.attachmentKind = attachmentKind;
 exports.fileNameFromUrl = fileNameFromUrl;
+exports.serializeMessage = serializeMessage;
+exports.deserializeMessage = deserializeMessage;
 const baileys_1 = require("@whiskeysockets/baileys");
 function isDirectChatJid(jid) {
     return Boolean(jid && ((0, baileys_1.isPnUser)(jid) || (0, baileys_1.isLidUser)(jid)));
@@ -161,4 +163,18 @@ function fileNameFromUrl(url, fallback = 'attachment') {
     catch {
         return fallback;
     }
+}
+// A WhatsApp message as JSON for the retry queue on disk: bytes as base64, 64-bit numbers as plain numbers, and
+// preview thumbnails dropped (the media itself is downloaded again from WhatsApp when the retry runs).
+function serializeMessage(msg) {
+    return JSON.stringify({ key: msg.key, message: msg.message, pushName: msg.pushName ?? null }, (key, value) => {
+        if (key === 'jpegThumbnail')
+            return undefined;
+        if (value && typeof value === 'object' && 'low' in value && typeof value.toNumber === 'function')
+            return value.toNumber();
+        return baileys_1.BufferJSON.replacer(key, value);
+    });
+}
+function deserializeMessage(raw) {
+    return JSON.parse(raw, baileys_1.BufferJSON.reviver);
 }

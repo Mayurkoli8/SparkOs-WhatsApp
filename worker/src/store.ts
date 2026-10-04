@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { DATA_DIR } from './config';
 import { log } from './events';
+import type { ProtectionPolicy } from './protection';
 
 export type InstanceRecord = {
   id: string;
@@ -20,6 +21,26 @@ export type InstanceRecord = {
   linkedAt?: string | null;
   // WhatsApp stops this number from starting new chats until then (epoch ms).
   restrictedUntil?: number | null;
+  // Admin overrides of the protection defaults (unset fields follow the defaults), and a restarted warm-up.
+  protection?: Partial<ProtectionPolicy>;
+  warmupFrom?: string | null;
+  // The HighLevel user who owns this number's contacts: new contacts are assigned to them (or every contact, "always").
+  assignedUserId?: string | null;
+  assignedUserName?: string | null;
+  assignMode?: 'unassigned' | 'always';
+};
+
+// Admin-editable settings; anything unset falls back to the worker's environment defaults.
+export type Settings = {
+  inboundType?: string;
+  providerId?: string;
+  limits?: Record<string, number>;
+  slotCounters?: Record<string, number>;
+  defaultNumberLimit?: number;
+  protectionDefaults?: Partial<ProtectionPolicy>;
+  failoverWaitSeconds?: number;
+  sendGapSeconds?: number;
+  alertWebhookUrl?: string | null;
 };
 
 export type GhlConnection = {
@@ -57,9 +78,8 @@ export type Registry = {
   instances: Record<string, InstanceRecord>;
   ghl: Record<string, GhlConnection>;
   companies: Record<string, CompanyConnection>;
-  // Learned from HighLevel: the inbound message type its conversation provider accepts, and the provider id it
-  // actually uses (read from a message sent through the provider).
-  settings: { inboundType?: string; providerId?: string; limits?: Record<string, number>; slotCounters?: Record<string, number> };
+  // inboundType and providerId are learned from HighLevel; the rest is set by the admin.
+  settings: Settings;
 };
 
 export const REGISTRY_FILE = path.join(DATA_DIR, 'registry.json');

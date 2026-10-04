@@ -1,4 +1,4 @@
-import { isLidUser, isPnUser, jidDecode, normalizeMessageContent, WAMessageStatus, type proto } from '@whiskeysockets/baileys';
+import { BufferJSON, isLidUser, isPnUser, jidDecode, normalizeMessageContent, WAMessageStatus, type proto, type WAMessage } from '@whiskeysockets/baileys';
 import type { GhlStatus } from './ghl';
 
 export type MediaKind = 'image' | 'video' | 'audio' | 'document' | 'sticker';
@@ -147,4 +147,18 @@ export function fileNameFromUrl(url: string, fallback = 'attachment') {
   } catch {
     return fallback;
   }
+}
+
+// A WhatsApp message as JSON for the retry queue on disk: bytes as base64, 64-bit numbers as plain numbers, and
+// preview thumbnails dropped (the media itself is downloaded again from WhatsApp when the retry runs).
+export function serializeMessage(msg: Pick<WAMessage, 'key' | 'message' | 'pushName'>) {
+  return JSON.stringify({ key: msg.key, message: msg.message, pushName: msg.pushName ?? null }, (key, value) => {
+    if (key === 'jpegThumbnail') return undefined;
+    if (value && typeof value === 'object' && 'low' in value && typeof value.toNumber === 'function') return value.toNumber();
+    return BufferJSON.replacer(key, value);
+  });
+}
+
+export function deserializeMessage(raw: string): WAMessage {
+  return JSON.parse(raw, BufferJSON.reviver) as WAMessage;
 }

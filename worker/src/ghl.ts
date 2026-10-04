@@ -23,9 +23,23 @@ export class GhlNotConnectedError extends Error {
   }
 }
 
-type RequestOptions = { method?: string; version: string; body?: unknown };
+// idempotent: the request may be repeated after a lost response (reads and updates are; creates are not, unless the
+// endpoint itself is an upsert).
+type RequestOptions = { method?: string; version: string; body?: unknown; idempotent?: boolean };
 
-async function call(token: string, endpoint: string, { method = 'GET', version, body }: RequestOptions) {
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_MS = Number(process.env.GHL_RETRY_BASE_MS || 1000);
+const REPEATABLE_METHODS = new Set(['GET', 'HEAD', 'PUT', 'DELETE']);
+const pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+function retryAfterMs(res: Response) {
+  const seconds = Number(res.headers.get('retry-after'));
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds * 1000, 15_000) : null;
+}
+
+// Rate limits (429) are retried for every request, since HighLevel refused it without doing anything. Outages (5xx,
+// timeouts, dropped connections) are retried only where repeating cannot create a duplicate.
+async function call(token: string, endpoint: string, { method = 'GET', version, body, idempotent }: RequestOptions) {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Version: version, Accept: 'application/json' };
   let payload: BodyInit | undefined;
   if (body instanceof FormData) payload = body;
@@ -33,14 +47,31 @@ async function call(token: string, endpoint: string, { method = 'GET', version, 
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch(`${GHL_BASE}${endpoint}`, { method, headers, body: payload, signal: AbortSignal.timeout(30_000) });
-  const text = await res.text();
-  if (!res.ok) throw new GhlApiError(`GHL ${method} ${endpoint.split('?')[0]} failed with HTTP ${res.status}`, res.status, text.slice(0, 1000));
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { raw: text };
+  const repeatable = idempotent ?? REPEATABLE_METHODS.has(method);
+  for (let attempt = 1; ; attempt++) {
+    const backoff = RETRY_BASE_MS * 3 ** (attempt - 1);
+    let res: Response;
+    try {
+      res = await fetch(`${GHL_BASE}${endpoint}`, { method, headers, body: payload, signal: AbortSignal.timeout(30_000) });
+    } catch (err) {
+      if (!repeatable || attempt >= MAX_ATTEMPTS) throw err;
+      await pause(backoff);
+      continue;
+    }
+    const text = await res.text();
+    if (res.ok) {
+      if (!text) return {};
+      try {
+        return JSON.parse(text);
+      } catch {
+        return { raw: text };
+      }
+    }
+    const retry = res.status === 429 || (res.status >= 500 && repeatable);
+    if (!retry || attempt >= MAX_ATTEMPTS) {
+      throw new GhlApiError(`GHL ${method} ${endpoint.split('?')[0]} failed with HTTP ${res.status}`, res.status, text.slice(0, 1000));
+    }
+    await pause(retryAfterMs(res) ?? backoff);
   }
 }
 
@@ -391,7 +422,8 @@ export async function upsertContact(locationId: string, phoneE164: string, displ
   const data = await ghlRequest(locationId, '/contacts/upsert', {
     method: 'POST',
     version: CONTACTS_VERSION,
-    body: { locationId, phone: phoneE164 }
+    body: { locationId, phone: phoneE164 },
+    idempotent: true
   });
   const contactId: string | undefined = data.contact?.id || data.contactId || data.id;
   if (!contactId) throw new Error(`GHL contact upsert returned no contact id: ${JSON.stringify(data).slice(0, 300)}`);
@@ -403,7 +435,26 @@ export async function upsertContact(locationId: string, phoneE164: string, displ
       body: { ...splitName(displayName), source: 'WhatsApp' }
     }).catch(() => undefined);
   }
-  return { contactId, isNew };
+  return { contactId, isNew, assignedTo: (data.contact?.assignedTo as string | undefined) || null };
+}
+
+export async function assignContact(locationId: string, contactId: string, userId: string) {
+  await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { method: 'PUT', version: CONTACTS_VERSION, body: { assignedTo: userId } });
+}
+
+export type GhlUser = { id: string; name: string; email?: string };
+
+// Needs the users.readonly scope.
+export async function listUsers(locationId: string): Promise<GhlUser[]> {
+  const data = await ghlRequest(locationId, `/users/?${new URLSearchParams({ locationId })}`, { version: CONTACTS_VERSION });
+  const users: Record<string, any>[] = Array.isArray(data.users) ? data.users : [];
+  return users
+    .filter(u => u?.id && !u.deleted)
+    .map(u => {
+      const name = String(u.name || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.email || u.id).trim();
+      return u.email ? { id: String(u.id), name, email: String(u.email) } : { id: String(u.id), name };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export async function findOrCreateConversation(locationId: string, contactId: string): Promise<string> {
@@ -412,10 +463,12 @@ export async function findOrCreateConversation(locationId: string, contactId: st
   const existing = found.conversations?.[0]?.id;
   if (existing) return existing;
   try {
+    // Safe to repeat: a second create answers "already exists" with the conversation id, handled below.
     const created = await ghlRequest(locationId, '/conversations/', {
       method: 'POST',
       version: CONVERSATIONS_VERSION,
-      body: { locationId, contactId }
+      body: { locationId, contactId },
+      idempotent: true
     });
     const id = created.conversation?.id || created.id;
     if (!id) throw new Error(`GHL create conversation returned no id: ${JSON.stringify(created).slice(0, 300)}`);
@@ -501,6 +554,17 @@ export async function getContactTags(locationId: string, contactId: string): Pro
   return Array.isArray(data.contact?.tags) ? data.contact.tags : [];
 }
 
+// What outbound routing needs to know about a contact, from one lookup.
+export async function getContactRouting(locationId: string, contactId: string) {
+  const data = await ghlRequest(locationId, `/contacts/${encodeURIComponent(contactId)}`, { version: CONTACTS_VERSION });
+  const contact = data.contact || {};
+  return {
+    phone: (contact.phone as string | undefined) || null,
+    assignedTo: (contact.assignedTo as string | undefined) || null,
+    taggedPhone: parseWaTag(Array.isArray(contact.tags) ? contact.tags : [])
+  };
+}
+
 // The number a contact talks to, from their "wa: +number" tag (agents may edit it to move the contact).
 export async function getContactWaTag(locationId: string, contactId: string) {
   return parseWaTag(await getContactTags(locationId, contactId));
@@ -514,7 +578,7 @@ export async function setContactWaTag(locationId: string, contactId: string, pho
   const path = `/contacts/${encodeURIComponent(contactId)}/tags`;
   if (stale.length) await ghlRequest(locationId, path, { method: 'DELETE', version: CONTACTS_VERSION, body: { tags: stale } });
   if (!tags.some(t => t.trim().toLowerCase() === wanted)) {
-    await ghlRequest(locationId, path, { method: 'POST', version: CONTACTS_VERSION, body: { tags: [wanted] } });
+    await ghlRequest(locationId, path, { method: 'POST', version: CONTACTS_VERSION, body: { tags: [wanted] }, idempotent: true });
   }
 }
 

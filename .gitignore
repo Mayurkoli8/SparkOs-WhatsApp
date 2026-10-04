@@ -7,3 +7,5 @@ worker/data/
 web/.vercel/
 *.log
 .test-build/
+.playwright-mcp/
+*.tsbuildinfo

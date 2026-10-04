@@ -4,6 +4,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.log = void 0;
+exports.onEvent = onEvent;
 exports.recordEvent = recordEvent;
 exports.recentEvents = recentEvents;
 exports.loadEvents = loadEvents;
@@ -21,6 +22,10 @@ const MAX_EVENTS = 300;
 const EVENTS_FILE = node_path_1.default.join(config_1.DATA_DIR, 'events.json');
 let events = [];
 let saveTimer = null;
+const listeners = [];
+function onEvent(listener) {
+    listeners.push(listener);
+}
 function recordEvent(level, message, context = {}) {
     const event = { at: new Date().toISOString(), level, message, ...context };
     if (event.detail)
@@ -30,6 +35,14 @@ function recordEvent(level, message, context = {}) {
         events.splice(0, events.length - MAX_EVENTS);
     exports.log[level](context, message);
     scheduleSave();
+    for (const listener of listeners) {
+        try {
+            listener(event);
+        }
+        catch (err) {
+            exports.log.warn({ err }, 'event listener failed');
+        }
+    }
 }
 function recentEvents(limit = 100) {
     return events.slice(-limit).reverse();

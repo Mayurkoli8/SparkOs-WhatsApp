@@ -35,6 +35,19 @@ test('routeCandidates: an unknown token is reported, an unknown tag falls back t
   assert.deepEqual(routeCandidates(numbers, { taggedPhone: '15550000000' }).map(n => n.id), ['b', 'a', 'c']);
 });
 
+test('without a tag, the number of the contact\'s assigned user comes before the default', () => {
+  const owned = numbers.map(n => (n.id === 'c' ? { ...n, assignedUserId: 'U7' } : n));
+  assert.deepEqual(routeCandidates(owned, { assignedUserId: 'U7' }).map(n => n.id), ['c', 'b', 'a']);
+  assert.deepEqual(routeCandidates(owned, { taggedPhone: '919000000001', assignedUserId: 'U7' }).map(n => n.id), ['a', 'b', 'c'], 'the tag wins');
+  assert.deepEqual(routeCandidates(owned, { assignedUserId: 'nobody' }).map(n => n.id), ['b', 'a', 'c']);
+});
+
+test("then the number of the user who sends the message; the contact's owner comes first", () => {
+  const owned = numbers.map(n => (n.id === 'a' ? { ...n, assignedUserId: 'U1' } : n.id === 'c' ? { ...n, assignedUserId: 'U7' } : n));
+  assert.deepEqual(routeCandidates(owned, { senderUserId: 'U1' }).map(n => n.id), ['a', 'b', 'c']);
+  assert.deepEqual(routeCandidates(owned, { assignedUserId: 'U7', senderUserId: 'U1' }).map(n => n.id), ['c', 'b', 'a']);
+});
+
 test('without a default the lowest slot leads', () => {
   const noDefault = numbers.map(n => ({ ...n, isDefault: false }));
   assert.deepEqual(routeCandidates(noDefault, {}).map(n => n.id), ['a', 'b', 'c']);

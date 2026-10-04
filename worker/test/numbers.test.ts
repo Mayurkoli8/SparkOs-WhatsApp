@@ -1,7 +1,7 @@
 import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRegistry, registry, type InstanceRecord } from '../src/store';
-import { assignSlotsAndDefaults, claimSlot, limitFor, nextSlot, numbersOf, promoteDefault, setDefault } from '../src/numbers';
+import { assigneeFor, assignSlotsAndDefaults, claimSlot, effectivePolicy, limitFor, nextSlot, numbersOf, numberState, promoteDefault, setDefault } from '../src/numbers';
 
 const instance = (id: string, locationId: string, createdAt: string, extra: Partial<InstanceRecord> = {}): InstanceRecord => ({
   id,
@@ -73,4 +73,33 @@ test('each sub-account has a number limit, 5 unless set', () => {
   assert.equal(limitFor('L1'), 5);
   registry.settings.limits = { L1: 8 };
   assert.equal(limitFor('L1'), 8);
+  registry.settings.defaultNumberLimit = 3;
+  assert.equal(limitFor('L2'), 3, 'admin default for sub-accounts without their own limit');
+});
+
+test('protection policy: number overrides beat admin defaults, which beat the built-in defaults', () => {
+  const n = instance('n', 'L1', '2026-10-01T00:00:00Z');
+  assert.equal(effectivePolicy(n).newChatsPerDay, 30);
+  assert.equal(effectivePolicy(n).enabled, true);
+  registry.settings.protectionDefaults = { newChatsPerDay: 20, warmupDays: 3 };
+  assert.equal(effectivePolicy(n).newChatsPerDay, 20);
+  n.protection = { warmupDays: 0, enabled: false };
+  const p = effectivePolicy(n);
+  assert.deepEqual([p.newChatsPerDay, p.warmupDays, p.enabled, p.coldMessagesPerContact], [20, 0, false, 3]);
+});
+
+test("contacts are assigned to the number's user, without taking over other users' contacts unless told to", () => {
+  const n = instance('n', 'L1', '2026-10-01T00:00:00Z', { assignedUserId: 'U7' });
+  assert.equal(assigneeFor(n, null), 'U7');
+  assert.equal(assigneeFor(n, 'U7'), null, 'already assigned');
+  assert.equal(assigneeFor(n, 'U2'), null, 'belongs to someone else');
+  assert.equal(assigneeFor({ ...n, assignMode: 'always' }, 'U2'), 'U7');
+  assert.equal(assigneeFor({ ...n, assignedUserId: null }, null), null);
+});
+
+test('a restarted warm-up counts from the restart, not from the link date', () => {
+  const n = instance('n', 'L1', '2026-10-01T00:00:00Z', { linkedAt: '2026-10-01T00:00:00Z' });
+  assert.equal(numberState(n).linkedAt, Date.parse('2026-10-01T00:00:00Z'));
+  n.warmupFrom = '2026-10-04T00:00:00Z';
+  assert.equal(numberState(n).linkedAt, Date.parse('2026-10-04T00:00:00Z'));
 });

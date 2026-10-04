@@ -61,7 +61,7 @@ test('inbound sync uses the documented API versions, IDs and provider', async ()
     date: '2026-10-04T10:00:00.000Z'
   });
 
-  assert.deepEqual(contact, { contactId: 'C1', isNew: false });
+  assert.deepEqual(contact, { contactId: 'C1', isNew: false, assignedTo: null });
   assert.equal(conversationId, 'CONV1');
   assert.equal(result.messageId, 'GM1');
 
@@ -179,7 +179,7 @@ test('new contacts are named from the WhatsApp profile', async () => {
   on('POST', '/contacts/upsert', () => ({ json: { new: true, contact: { id: 'C2' } } }));
   on('PUT', '/contacts/C2', () => ({ json: { succeded: true } }));
 
-  assert.deepEqual(await ghl.upsertContact('LOC1', '+447700900123', 'Asha Rao'), { contactId: 'C2', isNew: true });
+  assert.deepEqual(await ghl.upsertContact('LOC1', '+447700900123', 'Asha Rao'), { contactId: 'C2', isNew: true, assignedTo: null });
   const [update] = callsTo('PUT', '/contacts/C2');
   assert.equal(update.headers.version, '2021-07-28');
   assert.deepEqual(update.body, { firstName: 'Asha', lastName: 'Rao', source: 'WhatsApp' });
@@ -282,6 +282,67 @@ test('API errors expose status and response body', async () => {
     assert.match(err.body, /phone must be valid/);
     return true;
   });
+});
+
+test('rate limits (429) are retried for any request', async () => {
+  let attempts = 0;
+  on('POST', '/conversations/messages/inbound', () => (++attempts < 3 ? { status: 429, json: { message: 'Too many requests' } } : { json: { messageId: 'GM9' } }));
+
+  const result = await ghl.addInboundMessage('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' });
+  assert.equal(result.messageId, 'GM9');
+  assert.equal(callsTo('POST', '/conversations/messages/inbound').length, 3);
+});
+
+test('server errors are retried for reads and updates, but a message is never posted twice', async () => {
+  let reads = 0;
+  on('GET', '/contacts/C7', () => (++reads < 2 ? { status: 503, json: {} } : { json: { contact: { id: 'C7', phone: '+15550001111' } } }));
+  assert.equal(await ghl.getContactPhone('LOC1', 'C7'), '+15550001111');
+
+  on('POST', '/conversations/messages/inbound', () => ({ status: 502, json: {} }));
+  await assert.rejects(ghl.addInboundMessage('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' }), /HTTP 502/);
+  assert.equal(callsTo('POST', '/conversations/messages/inbound').length, 1, 'it may have been stored already');
+
+  on('GET', '/contacts/C8', () => ({ status: 500, json: { message: 'boom' } }));
+  await assert.rejects(ghl.getContactPhone('LOC1', 'C8'), /HTTP 500/);
+  assert.equal(callsTo('GET', '/contacts/C8').length, 3, 'gives up after three attempts');
+});
+
+test('a contact upsert reports who the contact is assigned to', async () => {
+  on('POST', '/contacts/upsert', () => ({ json: { new: false, contact: { id: 'C1', assignedTo: 'U2' } } }));
+  assert.deepEqual(await ghl.upsertContact('LOC1', '+919876543210'), { contactId: 'C1', isNew: false, assignedTo: 'U2' });
+});
+
+test('contacts are assigned to a user through the contacts API', async () => {
+  on('PUT', '/contacts/C5', () => ({ json: { succeded: true } }));
+  await ghl.assignContact('LOC1', 'C5', 'U7');
+  const [call] = callsTo('PUT', '/contacts/C5');
+  assert.deepEqual(call.body, { assignedTo: 'U7' });
+  assert.equal(call.headers.version, '2021-07-28');
+});
+
+test('routing facts about a contact come from one lookup', async () => {
+  on('GET', '/contacts/C9', () => ({ json: { contact: { id: 'C9', phone: '+919000000009', assignedTo: 'U7', tags: ['vip', 'wa: +919000000002'] } } }));
+  assert.deepEqual(await ghl.getContactRouting('LOC1', 'C9'), { phone: '+919000000009', assignedTo: 'U7', taggedPhone: '919000000002' });
+  assert.equal(callsTo('GET', '/contacts/C9').length, 1);
+});
+
+test("a sub-account's users are listed by name, without deleted users", async () => {
+  on('GET', '/users/', () => ({
+    json: {
+      users: [
+        { id: 'U2', name: 'Zara Khan', email: 'zara@example.com' },
+        { id: 'U1', firstName: 'Asha', lastName: 'Rao' },
+        { id: 'U3', name: 'Former', deleted: true }
+      ]
+    }
+  }));
+  assert.deepEqual(await ghl.listUsers('LOC1'), [
+    { id: 'U1', name: 'Asha Rao' },
+    { id: 'U2', name: 'Zara Khan', email: 'zara@example.com' }
+  ]);
+  const [call] = callsTo('GET', '/users/');
+  assert.equal(call.url.searchParams.get('locationId'), 'LOC1');
+  assert.equal(call.headers.version, '2021-07-28');
 });
 
 test('locations without an OAuth connection are reported clearly', async () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { downloadPublicFile, isPublicAddress } from '../src/safe-fetch';
+import { downloadPublicFile, isPublicAddress, postPublicJson } from '../src/safe-fetch';
 
 test('isPublicAddress accepts public IPv4 and IPv6 addresses', () => {
   assert.equal(isPublicAddress('8.8.8.8'), true);
@@ -38,4 +38,11 @@ test('downloadPublicFile refuses non-https URLs and private targets before conne
   await assert.rejects(downloadPublicFile('https://169.254.169.254/latest/meta-data', max), /private/);
   await assert.rejects(downloadPublicFile('https://[::1]/a.png', max), /private/);
   await assert.rejects(downloadPublicFile('https://localhost/a.png', max), /private/);
+});
+
+test('postPublicJson refuses non-https URLs and private targets before connecting', async () => {
+  await assert.rejects(postPublicJson('http://example.com/hook', {}), /https/);
+  await assert.rejects(postPublicJson('https://127.0.0.1/hook', {}), /private/);
+  await assert.rejects(postPublicJson('https://169.254.169.254/hook', {}), /private/);
+  await assert.rejects(postPublicJson('https://localhost/hook', {}), /private/);
 });

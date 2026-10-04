@@ -18,32 +18,26 @@ import makeWASocket, {
   type WAMessageUpdate,
   type WASocket
 } from '@whiskeysockets/baileys';
-import {
-  COLD_MESSAGES_PER_CONTACT,
-  DATA_DIR,
-  FAILOVER_WAIT_MS,
-  MAX_MEDIA_BYTES,
-  NEW_CHATS_PER_DAY,
-  SEND_INTERVAL_MS,
-  SYNC_PHONE_MESSAGES,
-  WARMUP_DAYS,
-  WARMUP_NEW_CHATS_PER_DAY
-} from './config';
+import { DATA_DIR, MAX_MEDIA_BYTES, SYNC_PHONE_MESSAGES } from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
 import * as ghl from './ghl';
-import { numbersOf, promoteDefault } from './numbers';
-import { ProtectionBook, typingDelayMs, type NumberState } from './protection';
+import { assigneeFor, builtInPolicy, effectivePolicy, numbersOf, numberState, promoteDefault } from './numbers';
+import { ProtectionBook, typingDelayMs } from './protection';
+import { RetryQueue, type PendingItem } from './retry-queue';
 import { parseRouteToken, routeCandidates, type RouteNumber } from './routing';
 import { downloadPublicFile } from './safe-fetch';
+import { failoverWaitMs, sendGapMs } from './settings';
 import { registry, save, type InstanceRecord } from './store';
 import {
   attachmentKind,
+  deserializeMessage,
   extractContent,
   fileNameFromUrl,
   ghlStatusFromWa,
   isDirectChatJid,
   mediaLabel,
   resolvePhone,
+  serializeMessage,
   shouldAdvanceStatus,
   type ExtractedContent
 } from './wa-message';
@@ -77,7 +71,8 @@ const deliveries = new BoundedMap<string, Delivery>(5000);
 // Copies of what we sent; Baileys needs them to re-encrypt when a recipient asks for a retry.
 const sentMessages = new BoundedMap<string, proto.IMessage>(1000);
 const seenMessages = new BoundedMap<string, true>(5000);
-const contactCache = new BoundedMap<string, { contactId: string; conversationId: string; at: number }>(5000);
+// assignedTo: the contact's HighLevel owner as last seen (or set) by the bridge.
+const contactCache = new BoundedMap<string, { contactId: string; conversationId: string; assignedTo: string | null; at: number }>(5000);
 const numberCache = new BoundedMap<string, { jid: string | null; at: number }>(5000);
 // Phone-typed messages we mirrored into GHL; if GHL ever echoes one to the delivery URL it must not be re-sent.
 const mirroredGhlIds = new BoundedMap<string, true>(5000);
@@ -91,6 +86,8 @@ const sendQueues = new Map<string, Promise<void>>();
 const unread = new BoundedMap<string, WAMessageKey[]>(5000);
 // Location + contact id -> the number their "wa:" tag points at, so the tag is only rewritten when it changes.
 const tagCache = new BoundedMap<string, { phone: string; at: number }>(5000);
+// HighLevel message ids already handed to WhatsApp, so a repeated delivery webhook never sends a message twice.
+const handledDeliveries = new BoundedMap<string, number>(5000);
 
 const CONTACT_CACHE_MS = 6 * 3600_000;
 const TAG_CACHE_MS = 15 * 60_000;
@@ -100,12 +97,8 @@ const RESTRICTION_FALLBACK_MS = 24 * 3600_000;
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-export const protection = new ProtectionBook({
-  newChatsPerDay: NEW_CHATS_PER_DAY,
-  warmupDays: WARMUP_DAYS,
-  warmupNewChatsPerDay: WARMUP_NEW_CHATS_PER_DAY,
-  coldMessagesPerContact: COLD_MESSAGES_PER_CONTACT
-});
+// Every check passes the number's own policy (effectivePolicy); the built-in one is only the fallback.
+export const protection = new ProtectionBook(builtInPolicy());
 const PROTECTION_FILE = path.join(DATA_DIR, 'protection.json');
 let protectionTimer: NodeJS.Timeout | null = null;
 
@@ -131,8 +124,56 @@ function saveProtectionSoon() {
   protectionTimer.unref?.();
 }
 
-export function numberState(instance: InstanceRecord): NumberState {
-  return { linkedAt: instance.linkedAt ? Date.parse(instance.linkedAt) : null, restrictedUntil: instance.restrictedUntil ?? null };
+// WhatsApp messages that could not be synced into HighLevel (outage, token trouble) wait here and are retried.
+type PendingSync = { instanceId: string; phone: string; direction: 'inbound' | 'outbound'; sentAt?: number; raw: string };
+const pendingSync = new RetryQueue<PendingSync>(1000);
+const PENDING_FILE = path.join(DATA_DIR, 'pending-sync.json');
+let pendingTimer: NodeJS.Timeout | null = null;
+const queuedNotice = new Map<string, number>();
+
+export async function loadPendingSync() {
+  try {
+    pendingSync.load(JSON.parse(await fs.readFile(PENDING_FILE, 'utf8')));
+  } catch {
+    // nothing waiting
+  }
+}
+
+export async function flushPendingSync() {
+  if (pendingTimer) clearTimeout(pendingTimer);
+  pendingTimer = null;
+  const tmp = `${PENDING_FILE}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(pendingSync.toJSON()), 'utf8').then(() => fs.rename(tmp, PENDING_FILE)).catch(() => undefined);
+}
+
+function savePendingSoon() {
+  if (pendingTimer) return;
+  pendingTimer = setTimeout(() => void flushPendingSync(), 3000);
+  pendingTimer.unref?.();
+}
+
+export function pendingSyncSummary() {
+  const items = pendingSync.list();
+  return {
+    count: items.length,
+    oldestAt: items[0] ? new Date(items[0].firstFailedAt).toISOString() : null,
+    items: items.slice(0, 20).map(item => ({
+      locationId: registry.instances[item.payload.instanceId]?.locationId ?? null,
+      slot: registry.instances[item.payload.instanceId]?.slot ?? null,
+      phone: maskPhone(item.payload.phone),
+      direction: item.payload.direction,
+      attempts: item.attempts,
+      firstFailedAt: new Date(item.firstFailedAt).toISOString(),
+      nextAt: new Date(item.nextAt).toISOString(),
+      lastError: item.lastError
+    }))
+  };
+}
+
+export function retryPendingNow() {
+  pendingSync.retryAllNow(Date.now());
+  void processPendingSync();
+  return pendingSync.size;
 }
 
 export function authDir(id: string) {
@@ -278,8 +319,21 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
     reconnectAttempts.delete(id);
     replacedCount.delete(id);
     const phone = jidDecode(session.sock.user?.id)?.user;
-    updateInstance(id, { status: 'connected', phone, qr: null, lastError: null, linkedAt: meta.linkedAt || new Date().toISOString() });
-    recordEvent('info', `WhatsApp connected as ${maskPhone(phone)}`, context);
+    // A different phone scanned into this slot is a new WhatsApp account: it warms up from scratch.
+    const newAccount = Boolean(meta.phone && phone && meta.phone !== phone);
+    if (newAccount) {
+      protection.forget(id);
+      saveProtectionSoon();
+    }
+    updateInstance(id, {
+      status: 'connected',
+      phone,
+      qr: null,
+      lastError: null,
+      linkedAt: newAccount || !meta.linkedAt ? new Date().toISOString() : meta.linkedAt,
+      ...(newAccount ? { warmupFrom: null, restrictedUntil: null } : {})
+    });
+    recordEvent('info', newAccount ? `WhatsApp connected as ${maskPhone(phone)}, a different number than before; its warm-up starts now` : `WhatsApp connected as ${maskPhone(phone)}`, context);
     // Learn whether WhatsApp currently limits this number before anything is sent from it.
     session.sock
       .fetchAccountReachoutTimelock()
@@ -300,7 +354,7 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
     // The credentials are dead; wipe them so the next start shows a fresh QR instead of failing again.
     await fs.rm(authDir(id), { recursive: true, force: true });
     updateInstance(id, { status: 'logged_out', qr: null, lastError: 'WhatsApp logged this device out. Click "Reconnect" and scan a new QR code.' });
-    recordEvent('warn', 'WhatsApp logged this device out; scan a new QR code to reconnect', context);
+    recordEvent('error', `WhatsApp logged out #${meta.slot} ${meta.name} (${maskPhone(meta.phone)}); scan a new QR code to reconnect`, context);
     return;
   }
   if (code === DisconnectReason.forbidden || code === DisconnectReason.multideviceMismatch) {
@@ -417,21 +471,32 @@ function queueIncoming(instanceId: string, sock: WASocket, msg: WAMessage, type:
   // "append" carries messages that arrived while this worker was offline; take recent ones, skip old backlog.
   const sentAt = timestampMs(msg);
   if (type === 'append' && (!sentAt || Date.now() - sentAt > OFFLINE_WINDOW_MS)) return;
-  if (seenMessages.has(key.id)) return;
+  // The retry queue survives restarts (seenMessages does not), so a message waiting there is never synced twice.
+  if (seenMessages.has(key.id) || pendingSync.has(key.id)) return;
   const content = extractContent(msg.message);
   if (!content) return;
   seenMessages.set(key.id, true);
+  void inChat(`${instanceId}|${key.remoteJid}`, () => syncToGhl(instanceId, sock, msg, content)).catch(err =>
+    recordEvent('error', 'Failed to sync a WhatsApp message to HighLevel', { instanceId, locationId: registry.instances[instanceId]?.locationId, detail: describeError(err) })
+  );
+}
 
-  // Messages of one chat are pushed in order; different chats run in parallel.
-  const chatKey = `${instanceId}|${key.remoteJid}`;
-  const next = (chatQueues.get(chatKey) ?? Promise.resolve())
-    .then(() => syncToGhl(instanceId, sock, msg, content))
-    .catch(err => {
-      const detail = err instanceof ghl.GhlApiError ? `${err.message}: ${err.body}` : errorText(err);
-      recordEvent('error', 'Failed to sync a WhatsApp message to HighLevel', { instanceId, locationId: registry.instances[instanceId]?.locationId, detail });
-    });
-  chatQueues.set(chatKey, next);
-  void next.finally(() => chatQueues.get(chatKey) === next && chatQueues.delete(chatKey));
+// Messages of one chat are pushed in order; different chats run in parallel.
+function inChat(chatKey: string, task: () => Promise<void>) {
+  const run = (chatQueues.get(chatKey) ?? Promise.resolve()).catch(() => undefined).then(task);
+  chatQueues.set(chatKey, run);
+  void run.catch(() => undefined).finally(() => chatQueues.get(chatKey) === run && chatQueues.delete(chatKey));
+  return run;
+}
+
+function describeError(err: unknown) {
+  return err instanceof ghl.GhlApiError ? `${err.message}: ${err.body}` : errorText(err);
+}
+
+// HighLevel rejecting the content itself (400/422) will not change on a retry; outages, rate limits, expired or
+// revoked tokens and missing installs can, once the admin fixes them.
+function worthRetrying(err: unknown) {
+  return !(err instanceof ghl.GhlApiError && (err.status === 400 || err.status === 422));
 }
 
 function phoneSendKey(locationId: string, digits: string, text: string) {
@@ -441,13 +506,14 @@ function phoneSendKey(locationId: string, digits: string, text: string) {
 async function resolveContact(locationId: string, phone: string, displayName?: string) {
   const cacheKey = `${locationId}|${phone}`;
   const hit = contactCache.get(cacheKey);
-  if (hit && Date.now() - hit.at < CONTACT_CACHE_MS) return { contactId: hit.contactId, conversationId: hit.conversationId, cached: true };
-  const { contactId } = await ghl.upsertContact(locationId, `+${phone}`, displayName);
+  if (hit && Date.now() - hit.at < CONTACT_CACHE_MS) return { ...hit, cached: true };
+  const { contactId, assignedTo } = await ghl.upsertContact(locationId, `+${phone}`, displayName);
   const conversationId = await ghl.findOrCreateConversation(locationId, contactId);
-  contactCache.set(cacheKey, { contactId, conversationId, at: Date.now() });
-  return { contactId, conversationId, cached: false };
+  contactCache.set(cacheKey, { contactId, conversationId, assignedTo, at: Date.now() });
+  return { contactId, conversationId, assignedTo, cached: false };
 }
 
+// First sight of a WhatsApp message: protection bookkeeping happens once, then the HighLevel push (retried if needed).
 async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, content: ExtractedContent) {
   const meta = registry.instances[instanceId];
   if (!meta) return;
@@ -475,9 +541,48 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
   }
   if (direction === 'outbound' && content.text.trim()) recentPhoneSends.set(phoneSendKey(locationId, phone, content.text), Date.now());
 
+  const sentAt = timestampMs(msg);
+  try {
+    await pushToGhl(instanceId, sock, msg, content, phone, direction, sentAt);
+  } catch (err) {
+    if (!worthRetrying(err)) throw err;
+    const job: PendingSync = { instanceId, phone, direction, sentAt, raw: serializeMessage(msg) };
+    const dropped = pendingSync.add(msg.key.id!, job, Date.now(), describeError(err));
+    savePendingSoon();
+    // One notice per location every 10 minutes, not one per message, while HighLevel is unreachable.
+    if (Date.now() - (queuedNotice.get(locationId) ?? 0) > 10 * 60_000) {
+      queuedNotice.set(locationId, Date.now());
+      recordEvent('warn', `HighLevel did not take a WhatsApp message ${direction === 'inbound' ? 'from' : 'to'} ${maskPhone(phone)}; it waits in the retry queue and is synced automatically`, {
+        ...context,
+        detail: describeError(err)
+      });
+    }
+    if (dropped) {
+      recordEvent('error', `The retry queue is full, so the oldest waiting WhatsApp message (${maskPhone(dropped.payload.phone)}) was dropped`, {
+        instanceId: dropped.payload.instanceId,
+        locationId: registry.instances[dropped.payload.instanceId]?.locationId
+      });
+    }
+  }
+}
+
+async function pushToGhl(
+  instanceId: string,
+  sock: WASocket | null,
+  msg: WAMessage,
+  content: ExtractedContent,
+  phone: string,
+  direction: 'inbound' | 'outbound',
+  sentAt: number | undefined
+) {
+  const meta = registry.instances[instanceId];
+  if (!meta) return;
+  const { locationId } = meta;
+  const context = { instanceId, locationId };
   const displayName = direction === 'inbound' ? msg.pushName || undefined : undefined;
   let target = await resolveContact(locationId, phone, displayName);
   void ensureWaTag(locationId, target.contactId, meta.phone);
+  void ensureAssignment(meta, phone, target);
   let message = content.text;
   let attachments: string[] = [];
   if (content.media) {
@@ -487,7 +592,6 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
     });
     if (!message) message = mediaLabel(content.media);
   }
-  const sentAt = timestampMs(msg);
   const send = () =>
     ghl.addInboundMessageDetectingType(locationId, {
       contactId: target.contactId,
@@ -519,6 +623,55 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
   void verifyMirrorDirection(locationId, result.messageId);
 }
 
+let retryRunning = false;
+
+async function processPendingSync() {
+  if (retryRunning) return;
+  retryRunning = true;
+  try {
+    for (const item of pendingSync.due(Date.now()).slice(0, 25)) await retryOne(item);
+  } finally {
+    retryRunning = false;
+  }
+}
+
+async function retryOne(item: PendingItem<PendingSync>) {
+  const { instanceId, phone, direction, sentAt, raw } = item.payload;
+  const meta = registry.instances[instanceId];
+  let msg: WAMessage | null = null;
+  try {
+    msg = deserializeMessage(raw);
+  } catch {
+    // unreadable entry; dropped below
+  }
+  const content = msg?.message ? extractContent(msg.message) : null;
+  if (!meta || !msg || !content) {
+    pendingSync.succeeded(item.id);
+    savePendingSoon();
+    return;
+  }
+  // Media is downloaded again through the number's WhatsApp session, so wait until it is back online.
+  if (content.media && !isLive(instanceId)) {
+    pendingSync.postpone(item.id, Date.now(), 2 * 60_000);
+    return;
+  }
+  const context = { instanceId, locationId: meta.locationId };
+  const label = `${direction === 'inbound' ? 'from' : 'to'} ${maskPhone(phone)}`;
+  const message = msg;
+  try {
+    await inChat(`${instanceId}|${message.key.remoteJid}`, () => pushToGhl(instanceId, sessions.get(instanceId)?.sock ?? null, message, content, phone, direction, sentAt));
+    pendingSync.succeeded(item.id);
+    recordEvent('info', `Synced a waiting WhatsApp message ${label} into HighLevel (attempt ${item.attempts + 1})`, context);
+  } catch (err) {
+    const outcome = worthRetrying(err) ? pendingSync.failed(item.id, Date.now(), describeError(err)) : 'gave-up';
+    if (outcome === 'gave-up') {
+      pendingSync.succeeded(item.id);
+      recordEvent('error', `Gave up syncing a WhatsApp message ${label} into HighLevel after ${item.attempts} attempts`, { ...context, detail: describeError(err) });
+    }
+  }
+  savePendingSoon();
+}
+
 function rememberUnread(instanceId: string, phone: string, key: WAMessageKey) {
   const id = `${instanceId}|${phone}`;
   unread.set(id, [...(unread.get(id) ?? []), key].slice(-20));
@@ -531,6 +684,20 @@ async function markRead(instanceId: string, sock: WASocket, phone: string) {
   if (!keys?.length) return;
   unread.delete(id);
   await sock.readMessages(keys).catch(err => log.debug({ err }, 'marking messages read failed'));
+}
+
+// Contacts who talk with a number that has an owner are assigned to that HighLevel user (see assigneeFor).
+async function ensureAssignment(meta: InstanceRecord, phone: string, target: { contactId: string; assignedTo: string | null }) {
+  const userId = assigneeFor(meta, target.assignedTo);
+  if (!userId) return;
+  try {
+    await ghl.assignContact(meta.locationId, target.contactId, userId);
+    const cached = contactCache.get(`${meta.locationId}|${phone}`);
+    if (cached) cached.assignedTo = userId;
+    recordEvent('info', `Assigned ${maskPhone(phone)} to ${meta.assignedUserName || 'its owner'} (number #${meta.slot})`, { instanceId: meta.id, locationId: meta.locationId });
+  } catch (err) {
+    recordEvent('warn', `Could not assign ${maskPhone(phone)} to ${meta.assignedUserName || userId}`, { instanceId: meta.id, locationId: meta.locationId, detail: describeError(err) });
+  }
 }
 
 // The contact's "wa: +number" tag follows the number they last wrote to; replies are routed by it.
@@ -580,11 +747,12 @@ const MIME_EXTENSIONS: Record<string, string> = {
   'application/pdf': 'pdf'
 };
 
-async function uploadMedia(sock: WASocket, msg: WAMessage, content: ExtractedContent, locationId: string, target: { contactId: string; conversationId: string }) {
+async function uploadMedia(sock: WASocket | null, msg: WAMessage, content: ExtractedContent, locationId: string, target: { contactId: string; conversationId: string }) {
   const info = content.media!;
   const limitMb = Math.round(MAX_MEDIA_BYTES / 1024 / 1024);
   if (info.size && info.size > MAX_MEDIA_BYTES) throw new Error(`the file is larger than ${limitMb} MB`);
-  const data = await downloadMediaMessage(msg, 'buffer', {}, { logger: baileysLogger, reuploadRequest: sock.updateMediaMessage });
+  const reuploadRequest = sock ? sock.updateMediaMessage : () => Promise.reject(new Error('the WhatsApp number is offline'));
+  const data = await downloadMediaMessage(msg, 'buffer', {}, { logger: baileysLogger, reuploadRequest });
   if (data.length > MAX_MEDIA_BYTES) throw new Error(`the file is larger than ${limitMb} MB`);
   const mimetype = info.mimetype.split(';')[0].trim();
   const fileName = info.fileName || `${info.kind}-${msg.key.id}.${MIME_EXTENSIONS[mimetype] || 'bin'}`;
@@ -621,9 +789,18 @@ export type ProviderOutboundPayload = {
   message?: string;
   attachments?: unknown;
   type?: string;
+  // The HighLevel user who sent the message.
+  userId?: string;
 };
 
-const toRouteNumber = (i: InstanceRecord): RouteNumber => ({ id: i.id, slot: i.slot ?? 0, name: i.name, phone: i.phone, isDefault: Boolean(i.isDefault) });
+const toRouteNumber = (i: InstanceRecord): RouteNumber => ({
+  id: i.id,
+  slot: i.slot ?? 0,
+  name: i.name,
+  phone: i.phone,
+  isDefault: Boolean(i.isDefault),
+  assignedUserId: i.assignedUserId ?? null
+});
 
 async function waitUntilLive(id: string, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
@@ -638,7 +815,8 @@ async function waitUntilLive(id: string, timeoutMs: number) {
 // Sends from one number are spaced out by a random gap; bursts are queued instead of fired at once.
 function enqueueSend(instanceId: string, task: () => Promise<void>) {
   const run = (sendQueues.get(instanceId) ?? Promise.resolve()).then(task);
-  const gap = run.catch(() => undefined).then(() => delay(SEND_INTERVAL_MS + Math.random() * SEND_INTERVAL_MS * 1.5));
+  const base = sendGapMs();
+  const gap = run.catch(() => undefined).then(() => delay(base + Math.random() * base * 1.5));
   sendQueues.set(instanceId, gap);
   void gap.finally(() => sendQueues.get(instanceId) === gap && sendQueues.delete(instanceId));
   return run;
@@ -741,13 +919,24 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
   };
 
   if (payload.messageId && mirroredGhlIds.has(payload.messageId)) return;
-  let phone = payload.phone || '';
-  // Some provider payloads carry only the contact; its phone number is on the contact record.
-  if (!phone && payload.contactId && ghl.isConnected(locationId)) {
-    phone = (await ghl.getContactPhone(locationId, payload.contactId).catch(() => null)) || '';
+  // HighLevel (or the web app forwarding to us) may repeat a delivery webhook; each message is sent once.
+  if (payload.messageId) {
+    if (handledDeliveries.has(payload.messageId)) {
+      log.info({ messageId: payload.messageId }, 'Ignored a repeated delivery webhook');
+      return;
+    }
+    handledDeliveries.set(payload.messageId, Date.now());
   }
-  const digits = phone.replace(/\D/g, '');
   const { token, text } = parseRouteToken((payload.message || '').trim());
+  // The contact record gives the phone when the payload lacks it, plus the routing hints: its "wa:" tag and its owner.
+  const lookup =
+    payload.contactId && ghl.isConnected(locationId) && (!payload.phone || !token)
+      ? await ghl.getContactRouting(locationId, payload.contactId).catch(err => {
+          log.warn({ err: errorText(err) }, 'contact lookup for routing failed');
+          return null;
+        })
+      : null;
+  const digits = (payload.phone || lookup?.phone || '').replace(/\D/g, '');
   const attachments = (Array.isArray(payload.attachments) ? payload.attachments : []).filter(
     (u): u is string => typeof u === 'string' && /^https?:\/\//i.test(u)
   );
@@ -759,24 +948,28 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
   const numbers = numbersOf(locationId);
   if (!numbers.length) return fail('no WhatsApp number is linked to this sub-account yet. Connect one on the sub-account page.');
 
-  // Token in the message, else the contact's "wa:" tag, else the default number; then the others as backups.
-  const taggedPhone =
-    token || !payload.contactId || !ghl.isConnected(locationId) ? null : await ghl.getContactWaTag(locationId, payload.contactId).catch(() => null);
+  // Token in the message, else the contact's "wa:" tag, else their owner's number, else the sender's, else the default.
   let candidates: RouteNumber[];
   try {
-    candidates = routeCandidates(numbers.map(toRouteNumber), { token, taggedPhone });
+    candidates = routeCandidates(numbers.map(toRouteNumber), {
+      token,
+      taggedPhone: token ? null : lookup?.taggedPhone,
+      assignedUserId: lookup?.assignedTo,
+      senderUserId: payload.userId
+    });
   } catch (err) {
     return fail(errorText(err));
   }
   const preferred = candidates[0];
-  const chosen = isLive(preferred.id) || (await waitUntilLive(preferred.id, FAILOVER_WAIT_MS)) ? preferred : candidates.slice(1).find(c => isLive(c.id));
+  const chosen = isLive(preferred.id) || (await waitUntilLive(preferred.id, failoverWaitMs())) ? preferred : candidates.slice(1).find(c => isLive(c.id));
   const session = chosen && sessions.get(chosen.id);
   if (!chosen || !session) return fail("none of this sub-account's WhatsApp numbers is connected. Reconnect them on the sub-account page.");
 
   const jid = await whatsappJid(session.sock, digits);
   if (!jid) return fail(`${maskPhone(digits)} is not registered on WhatsApp`);
   // Reaching out to people who never wrote to this number is limited; the slot is reserved before queueing.
-  const decision = protection.check(chosen.id, digits, numberState(registry.instances[chosen.id]), Date.now());
+  const number = registry.instances[chosen.id];
+  const decision = protection.check(chosen.id, digits, numberState(number), Date.now(), effectivePolicy(number));
   if (!decision.allowed) return fail(`number #${chosen.slot} (${maskPhone(chosen.phone)}): ${decision.reason}`);
   protection.recordSend(chosen.id, digits, Date.now());
   saveProtectionSoon();
@@ -789,6 +982,9 @@ async function deliverToWhatsApp(payload: ProviderOutboundPayload) {
       ...context,
       instanceId: chosen.id
     });
+    // A contact without a "wa:" tag is now in a chat with this number; tag it so later messages stay on it.
+    // (Only when the lookup worked: a failed lookup must not overwrite a tag that could not be read.)
+    if (lookup && !lookup.taggedPhone && chosen === preferred && payload.contactId) void ensureWaTag(locationId, payload.contactId, chosen.phone ?? undefined);
   } catch (err) {
     await fail('WhatsApp rejected the send', errorText(err));
   }
@@ -801,9 +997,61 @@ export async function sendDirect(instanceId: string, to: string, text: string) {
   const digits = to.replace(/\D/g, '');
   const jid = await whatsappJid(session.sock, digits);
   if (!jid) throw new Error(`${maskPhone(digits)} is not registered on WhatsApp`);
-  const decision = protection.check(instanceId, digits, numberState(instance), Date.now());
+  const decision = protection.check(instanceId, digits, numberState(instance), Date.now(), effectivePolicy(instance));
   if (!decision.allowed) throw new Error(decision.reason);
   protection.recordSend(instanceId, digits, Date.now());
   saveProtectionSoon();
   await sendFromNumber(instanceId, session.sock, jid, digits, { text, attachments: [] }, null);
+}
+
+// Admin "clear restriction": forget the stored restriction, then ask WhatsApp whether one is really still active.
+export async function recheckRestriction(id: string) {
+  updateInstance(id, { restrictedUntil: null });
+  const session = sessions.get(id);
+  if (!session || !isLive(id)) return { checked: false as const };
+  try {
+    applyRestriction(id, await session.sock.fetchAccountReachoutTimelock());
+    return { checked: true as const, restrictedUntil: registry.instances[id]?.restrictedUntil ?? null };
+  } catch (err) {
+    return { checked: false as const, error: errorText(err) };
+  }
+}
+
+// A linked number that stays offline is reported (and alerted) once, then again when it is back.
+const offlineSince = new Map<string, number>();
+const offlineReported = new Set<string>();
+const OFFLINE_REPORT_MS = 10 * 60_000;
+// Statuses that already raised their own event, or that wait for someone to scan a QR code.
+const REPORTED_STATUSES = new Set(['logged_out', 'error', 'conflict', 'qr', 'qr_expired']);
+
+function watchOffline(now = Date.now()) {
+  for (const instance of Object.values(registry.instances)) {
+    const context = { instanceId: instance.id, locationId: instance.locationId };
+    if (isLive(instance.id)) {
+      if (offlineReported.has(instance.id)) recordEvent('info', `WhatsApp number #${instance.slot} ${instance.name} is back online`, context);
+      offlineSince.delete(instance.id);
+      offlineReported.delete(instance.id);
+      continue;
+    }
+    if (!instance.linkedAt || REPORTED_STATUSES.has(instance.status)) continue;
+    const since = offlineSince.get(instance.id) ?? now;
+    offlineSince.set(instance.id, since);
+    if (now - since >= OFFLINE_REPORT_MS && !offlineReported.has(instance.id)) {
+      offlineReported.add(instance.id);
+      recordEvent('error', `WhatsApp number #${instance.slot} ${instance.name} (${maskPhone(instance.phone)}) has been offline for ${Math.round((now - since) / 60_000)} minutes`, {
+        ...context,
+        detail: instance.lastError || `status: ${instance.status}`
+      });
+    }
+  }
+}
+
+export function startBackgroundJobs() {
+  setInterval(() => void processPendingSync().catch(err => log.error({ err }, 'retry queue run failed')), 15_000).unref();
+  setInterval(() => watchOffline(), 60_000).unref();
+}
+
+export function sessionCounts() {
+  const ids = Object.keys(registry.instances);
+  return { total: ids.length, live: ids.filter(isLive).length };
 }
