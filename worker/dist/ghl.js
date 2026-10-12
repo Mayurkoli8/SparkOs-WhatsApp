@@ -15,6 +15,7 @@ exports.findOrCreateConversation = findOrCreateConversation;
 exports.inboundTypeCandidates = inboundTypeCandidates;
 exports.addInboundMessageDetectingType = addInboundMessageDetectingType;
 exports.effectiveProviderId = effectiveProviderId;
+exports.providerFor = providerFor;
 exports.learnProviderFromMessage = learnProviderFromMessage;
 exports.getContactTags = getContactTags;
 exports.getContactRouting = getContactRouting;
@@ -505,20 +506,28 @@ async function findOrCreateConversation(locationId, contactId) {
 }
 const PROVIDER_MISMATCH = /CONVERSATION_PROVIDER_MISMATCH|Incorrect conversationProviderId/i;
 // HighLevel has no API to read a provider's type, and a mismatched type is rejected before anything is created,
-// so try the plausible types once and remember the one HighLevel accepts.
-function inboundTypeCandidates() {
-    return [...new Set([store_1.registry.settings.inboundType, config_1.INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t) => Boolean(t)))];
+// so try the plausible types once and remember, per provider, the one HighLevel accepts (Custom for a custom
+// provider, SMS for a provider chosen as the sub-account's default SMS provider).
+function knownInboundType(providerId) {
+    return store_1.registry.settings.inboundTypes?.[providerId] ?? (providerId === bridgeProviderId() ? store_1.registry.settings.inboundType : undefined);
+}
+function inboundTypeCandidates(locationId) {
+    const known = knownInboundType(effectiveProviderId(locationId));
+    return [...new Set([known, config_1.INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t) => Boolean(t)))];
 }
 async function addInboundMessageDetectingType(locationId, input) {
-    const candidates = inboundTypeCandidates();
+    const providerId = effectiveProviderId(locationId);
+    const candidates = inboundTypeCandidates(locationId);
     const rejected = [];
     for (const type of candidates) {
         try {
             const result = await addInboundMessage(locationId, { ...input, type });
-            if (store_1.registry.settings.inboundType !== type) {
-                store_1.registry.settings.inboundType = type;
+            if (knownInboundType(providerId) !== type) {
+                store_1.registry.settings.inboundTypes = { ...store_1.registry.settings.inboundTypes, [providerId]: type };
+                if (providerId === bridgeProviderId())
+                    store_1.registry.settings.inboundType = type;
                 await (0, store_1.save)();
-                (0, events_1.recordEvent)('info', `HighLevel accepts this conversation provider's messages as type ${type}; using it from now on`, { locationId });
+                (0, events_1.recordEvent)('info', `HighLevel accepts conversation provider ${providerId}'s messages as type ${type}; using it from now on`, { locationId });
             }
             return result;
         }
@@ -528,26 +537,38 @@ async function addInboundMessageDetectingType(locationId, input) {
             rejected.push(type);
         }
     }
-    throw new Error(`HighLevel rejected conversation provider ${effectiveProviderId() || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`);
+    throw new Error(`HighLevel rejected conversation provider ${providerId || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`);
 }
-function effectiveProviderId() {
+// The provider configured for (or first confirmed by) the whole bridge.
+function bridgeProviderId() {
     return store_1.registry.settings.providerId || config_1.PROVIDER_ID;
 }
-// A message sent through the provider records the provider id HighLevel really uses; adopt it if it differs.
+// A sub-account may use the custom provider (its own tab in Conversations) or have the app chosen as its default SMS
+// provider; the one its messages really go through is learned from those messages.
+function effectiveProviderId(locationId) {
+    return (locationId && store_1.registry.settings.providers?.[locationId]) || bridgeProviderId();
+}
+function providerFor(locationId) {
+    const id = effectiveProviderId(locationId);
+    return { id, inboundType: knownInboundType(id) ?? null };
+}
+// A message HighLevel sent through the app records the provider id it really used for that sub-account.
 async function learnProviderFromMessage(locationId, messageId) {
     const message = await getMessage(locationId, messageId);
     const providerId = message?.conversationProviderId;
     if (!providerId)
         return null;
-    if (providerId !== effectiveProviderId()) {
-        const previous = effectiveProviderId();
-        store_1.registry.settings.providerId = providerId;
-        store_1.registry.settings.inboundType = undefined;
+    const previous = effectiveProviderId(locationId);
+    if (store_1.registry.settings.providers?.[locationId] !== providerId || !store_1.registry.settings.providerId) {
+        store_1.registry.settings.providers = { ...store_1.registry.settings.providers, [locationId]: providerId };
+        store_1.registry.settings.providerId ||= providerId;
         await (0, store_1.save)();
-        (0, events_1.recordEvent)('warn', `Conversation provider id corrected from ${previous || '(none)'} to ${providerId}, read from a message HighLevel sent through the provider`, {
-            locationId,
-            detail: `message type: ${message.messageType || 'unknown'}`
-        });
+        if (providerId !== previous) {
+            (0, events_1.recordEvent)('warn', `Sub-account ${locationId} sends through conversation provider ${providerId} (was ${previous || 'none'}), read from a message HighLevel sent through it`, {
+                locationId,
+                detail: `message type: ${message.messageType || 'unknown'}`
+            });
+        }
     }
     return providerId;
 }
@@ -590,7 +611,7 @@ async function addInboundMessage(locationId, input) {
         type: input.type || config_1.INBOUND_TYPE,
         contactId: input.contactId,
         conversationId: input.conversationId,
-        conversationProviderId: effectiveProviderId() || undefined,
+        conversationProviderId: effectiveProviderId(locationId) || undefined,
         message: input.message,
         attachments: input.attachments?.length ? input.attachments : undefined,
         altId: input.altId,

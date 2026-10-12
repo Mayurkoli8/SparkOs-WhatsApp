@@ -32,8 +32,13 @@ export type InstanceRecord = {
 
 // Admin-editable settings; anything unset falls back to the worker's environment defaults.
 export type Settings = {
+  // The bridge-wide provider and its inbound type (first learned / configured).
   inboundType?: string;
   providerId?: string;
+  // Learned per sub-account: the provider HighLevel routes its messages through (custom tab or default SMS provider),
+  // and per provider the inbound type HighLevel accepts (Custom for a custom provider, SMS for a default one).
+  providers?: Record<string, string>;
+  inboundTypes?: Record<string, string>;
   limits?: Record<string, number>;
   slotCounters?: Record<string, number>;
   defaultNumberLimit?: number;

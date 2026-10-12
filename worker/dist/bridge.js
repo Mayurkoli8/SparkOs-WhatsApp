@@ -898,15 +898,18 @@ function sendFromNumber(instanceId, sock, jid, digits, parts, delivery) {
         }
     });
 }
-let providerVerified = false;
+// Sub-account -> when its provider was last read from a message. Re-read every 15 minutes, so switching a sub-account
+// between the custom provider and the app as default SMS provider is picked up without a restart.
+const providerCheckedAt = new Map();
+const PROVIDER_RECHECK_MS = 15 * 60_000;
 function handleProviderOutbound(payload) {
     deliverToWhatsApp(payload).catch(err => (0, events_1.recordEvent)('error', 'Unexpected error while delivering a HighLevel message', { locationId: payload.locationId, detail: (0, events_1.errorText)(err) }));
-    // The message HighLevel just routed through the provider records the provider's real id; check it once per start.
+    // The message HighLevel just routed through the app records which of its providers this sub-account uses.
     const { locationId, messageId } = payload;
-    if (!providerVerified && locationId && messageId && ghl.isConnected(locationId)) {
-        providerVerified = true;
+    if (locationId && messageId && ghl.isConnected(locationId) && Date.now() - (providerCheckedAt.get(locationId) ?? 0) > PROVIDER_RECHECK_MS) {
+        providerCheckedAt.set(locationId, Date.now());
         ghl.learnProviderFromMessage(locationId, messageId).catch(err => {
-            providerVerified = false;
+            providerCheckedAt.delete(locationId);
             (0, events_1.recordEvent)('warn', 'Could not read the provider id from the HighLevel message', { locationId, detail: (0, events_1.errorText)(err) });
         });
     }

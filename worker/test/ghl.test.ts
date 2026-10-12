@@ -126,6 +126,51 @@ test('the real provider id is learned from a message sent through the provider',
   assert.equal(inboundBodies[0].conversationProviderId, 'REALPROV');
 });
 
+test('each sub-account learns the provider it really uses, so a default SMS provider and a custom one can coexist', async () => {
+  registry.settings = {};
+  registry.ghl.LOC2 = { ...registry.ghl.LOC1, locationId: 'LOC2' };
+  on('GET', '/conversations/messages/GM1', () => ({ json: { id: 'GM1', conversationProviderId: 'CUSTOMPROV', messageType: 'TYPE_CUSTOM_PROVIDER_SMS' } }));
+  on('GET', '/conversations/messages/GM2', () => ({ json: { id: 'GM2', conversationProviderId: 'SMSPROV', messageType: 'TYPE_SMS' } }));
+  // HighLevel takes a custom provider's messages as Custom and a default SMS provider's as SMS.
+  on('POST', '/conversations/messages/inbound', call => {
+    const ok = (call.body.conversationProviderId === 'CUSTOMPROV' && call.body.type === 'Custom') || (call.body.conversationProviderId === 'SMSPROV' && call.body.type === 'SMS');
+    return ok
+      ? { json: { success: true, messageId: 'GMX' } }
+      : { status: 400, json: { message: 'Incorrect conversationProviderId/type', canonicalCode: 'CONVERSATIONS_MSG_CONVERSATION_PROVIDER_MISMATCH' } };
+  });
+
+  await ghl.learnProviderFromMessage('LOC1', 'GM1');
+  await ghl.learnProviderFromMessage('LOC2', 'GM2');
+  assert.equal(ghl.effectiveProviderId('LOC1'), 'CUSTOMPROV');
+  assert.equal(ghl.effectiveProviderId('LOC2'), 'SMSPROV');
+
+  const input = { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' as const };
+  await ghl.addInboundMessageDetectingType('LOC2', input);
+  await ghl.addInboundMessageDetectingType('LOC1', input);
+  assert.deepEqual(ghl.providerFor('LOC2'), { id: 'SMSPROV', inboundType: 'SMS' });
+  assert.deepEqual(ghl.providerFor('LOC1'), { id: 'CUSTOMPROV', inboundType: 'Custom' });
+
+  // Once known, each sub-account goes straight to its own type.
+  const before = callsTo('POST', '/conversations/messages/inbound').length;
+  await ghl.addInboundMessageDetectingType('LOC2', input);
+  await ghl.addInboundMessageDetectingType('LOC1', input);
+  assert.equal(callsTo('POST', '/conversations/messages/inbound').length, before + 2);
+});
+
+test('a provider switched from custom to default SMS is picked up without a restart', async () => {
+  registry.settings = { inboundType: 'Custom', inboundTypes: { 'provider-123': 'Custom' } };
+  const types: string[] = [];
+  on('POST', '/conversations/messages/inbound', call => {
+    types.push(call.body.type);
+    return call.body.type === 'SMS'
+      ? { json: { success: true, messageId: 'GMS' } }
+      : { status: 400, json: { message: 'Incorrect conversationProviderId/type', canonicalCode: 'CONVERSATIONS_MSG_CONVERSATION_PROVIDER_MISMATCH' } };
+  });
+  await ghl.addInboundMessageDetectingType('LOC1', { contactId: 'C1', conversationId: 'CONV1', message: 'hi', direction: 'inbound' });
+  assert.deepEqual(types, ['Custom', 'SMS']);
+  assert.equal(ghl.providerFor('LOC1').inboundType, 'SMS');
+});
+
 test('a provider HighLevel rejects for every type is reported as not active', async () => {
   registry.settings = {};
   on('POST', '/conversations/messages/inbound', () => ({

@@ -33,7 +33,14 @@ export type NumberInfo = {
   assignedUserName: string | null;
   assignMode: 'unassigned' | 'always';
 };
-export type Location = { locationId: string; limit: number; ghl: { connected: boolean; problem: string | null }; numbers: NumberInfo[] };
+export type Location = {
+  locationId: string;
+  limit: number;
+  ghl: { connected: boolean; problem: string | null };
+  // The app's provider this sub-account uses, and how HighLevel takes its messages (Custom tab or SMS).
+  provider?: { id: string; inboundType: string | null };
+  numbers: NumberInfo[];
+};
 export type Check = { id: string; level: 'ok' | 'warn' | 'error'; message: string };
 export type BridgeEvent = { at: string; level: 'info' | 'warn' | 'error'; message: string; detail?: string };
 export type SettingsView = {

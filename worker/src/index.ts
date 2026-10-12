@@ -624,6 +624,7 @@ app.get('/admin/overview', (_req, res) => {
       locationId,
       limit: limitFor(locationId),
       ghl: { connected: ghl.isConnected(locationId), problem: ghl.connectionProblem(locationId) },
+      provider: ghl.providerFor(locationId),
       numbers: numbersOf(locationId).map(publicInstance)
     })),
     events

@@ -500,21 +500,29 @@ type InboundInput = {
 const PROVIDER_MISMATCH = /CONVERSATION_PROVIDER_MISMATCH|Incorrect conversationProviderId/i;
 
 // HighLevel has no API to read a provider's type, and a mismatched type is rejected before anything is created,
-// so try the plausible types once and remember the one HighLevel accepts.
-export function inboundTypeCandidates() {
-  return [...new Set([registry.settings.inboundType, INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t): t is string => Boolean(t)))];
+// so try the plausible types once and remember, per provider, the one HighLevel accepts (Custom for a custom
+// provider, SMS for a provider chosen as the sub-account's default SMS provider).
+function knownInboundType(providerId: string) {
+  return registry.settings.inboundTypes?.[providerId] ?? (providerId === bridgeProviderId() ? registry.settings.inboundType : undefined);
+}
+
+export function inboundTypeCandidates(locationId?: string) {
+  const known = knownInboundType(effectiveProviderId(locationId));
+  return [...new Set([known, INBOUND_TYPE, 'SMS', 'Custom', 'WhatsApp'].filter((t): t is string => Boolean(t)))];
 }
 
 export async function addInboundMessageDetectingType(locationId: string, input: InboundInput) {
-  const candidates = inboundTypeCandidates();
+  const providerId = effectiveProviderId(locationId);
+  const candidates = inboundTypeCandidates(locationId);
   const rejected: string[] = [];
   for (const type of candidates) {
     try {
       const result = await addInboundMessage(locationId, { ...input, type });
-      if (registry.settings.inboundType !== type) {
-        registry.settings.inboundType = type;
+      if (knownInboundType(providerId) !== type) {
+        registry.settings.inboundTypes = { ...registry.settings.inboundTypes, [providerId]: type };
+        if (providerId === bridgeProviderId()) registry.settings.inboundType = type;
         await save();
-        recordEvent('info', `HighLevel accepts this conversation provider's messages as type ${type}; using it from now on`, { locationId });
+        recordEvent('info', `HighLevel accepts conversation provider ${providerId}'s messages as type ${type}; using it from now on`, { locationId });
       }
       return result;
     } catch (err) {
@@ -523,28 +531,42 @@ export async function addInboundMessageDetectingType(locationId: string, input: 
     }
   }
   throw new Error(
-    `HighLevel rejected conversation provider ${effectiveProviderId() || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`
+    `HighLevel rejected conversation provider ${providerId || '(none set)'} for location ${locationId} with types ${rejected.join(', ')}. Either that is not the ID of the provider listed in the sub-account under Settings → Conversation Providers (copy the provider ID from the Marketplace app's Conversation Providers page into GHL_CONVERSATION_PROVIDER_ID on the worker, or send one message from the provider's tab in Conversations so the bridge learns it), or the provider is not active in this sub-account.`
   );
 }
 
-export function effectiveProviderId() {
+// The provider configured for (or first confirmed by) the whole bridge.
+function bridgeProviderId() {
   return registry.settings.providerId || PROVIDER_ID;
 }
 
-// A message sent through the provider records the provider id HighLevel really uses; adopt it if it differs.
+// A sub-account may use the custom provider (its own tab in Conversations) or have the app chosen as its default SMS
+// provider; the one its messages really go through is learned from those messages.
+export function effectiveProviderId(locationId?: string) {
+  return (locationId && registry.settings.providers?.[locationId]) || bridgeProviderId();
+}
+
+export function providerFor(locationId: string) {
+  const id = effectiveProviderId(locationId);
+  return { id, inboundType: knownInboundType(id) ?? null };
+}
+
+// A message HighLevel sent through the app records the provider id it really used for that sub-account.
 export async function learnProviderFromMessage(locationId: string, messageId: string): Promise<string | null> {
   const message = await getMessage(locationId, messageId);
   const providerId: string | undefined = message?.conversationProviderId;
   if (!providerId) return null;
-  if (providerId !== effectiveProviderId()) {
-    const previous = effectiveProviderId();
-    registry.settings.providerId = providerId;
-    registry.settings.inboundType = undefined;
+  const previous = effectiveProviderId(locationId);
+  if (registry.settings.providers?.[locationId] !== providerId || !registry.settings.providerId) {
+    registry.settings.providers = { ...registry.settings.providers, [locationId]: providerId };
+    registry.settings.providerId ||= providerId;
     await save();
-    recordEvent('warn', `Conversation provider id corrected from ${previous || '(none)'} to ${providerId}, read from a message HighLevel sent through the provider`, {
-      locationId,
-      detail: `message type: ${message.messageType || 'unknown'}`
-    });
+    if (providerId !== previous) {
+      recordEvent('warn', `Sub-account ${locationId} sends through conversation provider ${providerId} (was ${previous || 'none'}), read from a message HighLevel sent through it`, {
+        locationId,
+        detail: `message type: ${message.messageType || 'unknown'}`
+      });
+    }
   }
   return providerId;
 }
@@ -592,7 +614,7 @@ export async function addInboundMessage(locationId: string, input: InboundInput)
     type: input.type || INBOUND_TYPE,
     contactId: input.contactId,
     conversationId: input.conversationId,
-    conversationProviderId: effectiveProviderId() || undefined,
+    conversationProviderId: effectiveProviderId(locationId) || undefined,
     message: input.message,
     attachments: input.attachments?.length ? input.attachments : undefined,
     altId: input.altId,

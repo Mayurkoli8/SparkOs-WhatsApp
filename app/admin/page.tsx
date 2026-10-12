@@ -267,6 +267,15 @@ function LocationCard({ location, defaults, run }: { location: Location; default
             <span className={`dot ${ghl.problem ? 'bad' : 'good'}`} />
             {ghl.problem ? ghl.problem : 'HighLevel connected'}
           </div>
+          {!ghl.problem && location.provider && (
+            <div className="loc-ghl">
+              {location.provider.inboundType === 'SMS'
+                ? 'Messages show as SMS: SparkWA is this sub-account’s default SMS provider, so workflows and API “SMS” go out on WhatsApp.'
+                : location.provider.inboundType
+                  ? 'Messages show in the SparkWA tab (custom provider). API and n8n sends need type “Custom” with the provider ID.'
+                  : 'Channel not confirmed yet; it is learned from the first synced message.'}
+            </div>
+          )}
         </div>
         <div className="loc-tools">
           {editingLimit === null ? (
@@ -467,6 +476,11 @@ function Setup({ data }: { data: Overview }) {
           </li>
           <li>
             To pick contact owners from a list, the Marketplace app needs the <b>users.readonly</b> scope (then click Connect GHL again).
+          </li>
+          <li>
+            n8n or any API sender: post to <b>/conversations/messages</b> with <b>{'"type": "Custom"'}</b> and{' '}
+            <b>{`"conversationProviderId": "${worker?.providerId || 'the provider ID above'}"`}</b>; type <b>SMS</b> goes out as a real SMS unless SparkWA is
+            the sub-account’s default SMS provider.
           </li>
         </ul>
       </section>
