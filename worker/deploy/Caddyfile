@@ -1,3 +1,0 @@
-{$WORKER_DOMAIN} {
-	reverse_proxy worker:3001
-}
