@@ -5,8 +5,8 @@ export function workerUrl() {
 }
 
 export async function workerFetch(path: string, init?: RequestInit) {
-  const key = process.env.WORKER_API_KEY;
-  if (!key) throw new Error('WORKER_URL and WORKER_API_KEY are required');
+  const key = process.env.WORKER_API;
+  if (!key) throw new Error('Google Worker node expired, rotation required');
   return fetch(`${workerUrl()}${path}`, {
     signal: AbortSignal.timeout(25_000),
     ...init,
