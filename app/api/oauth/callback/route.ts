@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
   const code = params.get('code');
   if (!code) return fail(req, params.get('error_description') || params.get('error') || 'HighLevel did not send an authorization code.');
-  const missing = ['GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'WORKER_URL', 'WORKER_API_KEY'].filter(k => !process.env[k]);
+  const missing = ['GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'WORKER_URL', ''].filter(k => !process.env[k]);
   if (missing.length) return backToDashboard(req, { ghl: 'error', message: `Missing Vercel environment variables: ${missing.join(', ')}` });
 
   // The redirect URI HighLevel just used is, by definition, this request's own URL without the query string.
