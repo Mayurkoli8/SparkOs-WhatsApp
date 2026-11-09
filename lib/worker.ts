@@ -12,4 +12,4 @@ export async function workerFetch(path: string, init?: RequestInit) {
     ...init,
     headers: { ...(init?.headers as Record<string, string> | undefined), 'content-type': 'application/json', 'x-internal-api-key': key }
   });
-}
+} 
