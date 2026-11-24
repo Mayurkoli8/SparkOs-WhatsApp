@@ -28,6 +28,11 @@ export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
   const code = params.get('code');
   if (!code) return fail(req, params.get('error_description') || params.get('error') || 'HighLevel did not send an authorization code.');
+  const callbackUserType = params.get('userType');
+  if (callbackUserType && callbackUserType !== 'Company' && callbackUserType !== 'Location') {
+    return fail(req, `HighLevel returned an unsupported user type: ${callbackUserType}`);
+  }
+  const userType = callbackUserType || 'Location';
   const missing = ['GHL_CLIENT_ID', 'GHL_CLIENT_SECRET', 'WORKER_URL', 'WORKER_API_KEY'].filter(k => !process.env[k]);
   if (missing.length) return backToDashboard(req, { ghl: 'error', message: `Missing Vercel environment variables: ${missing.join(', ')}` });
 
@@ -37,7 +42,7 @@ export async function GET(req: NextRequest) {
     client_secret: process.env.GHL_CLIENT_SECRET!,
     grant_type: 'authorization_code',
     code,
-    user_type: 'Location',
+    user_type: userType,
     redirect_uri: `${req.nextUrl.origin}${req.nextUrl.pathname}`
   });
 
