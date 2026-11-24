@@ -22,6 +22,7 @@ import {
 } from './config';
 import { sendTestAlert, startAlerts } from './alerts';
 import { errorText, flushEvents, loadEvents, log, recentEvents, recordEvent } from './events';
+import { isValidHistoryBackfillDays, MAX_HISTORY_BACKFILL_DAYS } from './history-backfill';
 import * as ghl from './ghl';
 import * as bridge from './bridge';
 import { assignSlotsAndDefaults, claimSlot, defaultPolicy, effectivePolicy, limitFor, numbersOf, numberState, setDefault, setLimit } from './numbers';
@@ -85,6 +86,7 @@ const publicInstance = (instance: InstanceRecord) => {
     lastError: lastError || null,
     historyBackfillStatus: instance.historyBackfillStatus || null,
     historyBackfillCount: instance.historyBackfillCount || 0,
+    historyBackfillDays: instance.historyBackfillDays || null,
     slot: slot ?? null,
     isDefault: Boolean(isDefault),
     linkedAt: linkedAt || null,
@@ -319,8 +321,8 @@ app.post('/instances/:id/restart', async (req, res) => {
   try {
     if (!registry.instances[req.params.id]) return res.status(404).json({ error: 'Not found' });
     const historyBackfillDays = req.body?.historyBackfillDays;
-    if (historyBackfillDays !== undefined && historyBackfillDays !== 3) {
-      return res.status(400).json({ error: 'historyBackfillDays must be 3' });
+    if (historyBackfillDays !== undefined && !isValidHistoryBackfillDays(historyBackfillDays)) {
+      return res.status(400).json({ error: `historyBackfillDays must be a whole number from 1 to ${MAX_HISTORY_BACKFILL_DAYS}` });
     }
     await bridge.startInstance(req.params.id, { fresh: req.body?.fresh === true, historyBackfillDays });
     res.json({ ok: true, instance: publicInstance(registry.instances[req.params.id]) });

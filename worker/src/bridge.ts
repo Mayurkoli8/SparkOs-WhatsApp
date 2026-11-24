@@ -20,6 +20,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { DATA_DIR, MAX_MEDIA_BYTES, SYNC_PHONE_MESSAGES } from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
+import { isValidHistoryBackfillDays, MAX_HISTORY_BACKFILL_DAYS } from './history-backfill';
 import * as ghl from './ghl';
 import { assigneeFor, builtInPolicy, effectivePolicy, numbersOf, numberState, promoteDefault } from './numbers';
 import { ProtectionBook, typingDelayMs } from './protection';
@@ -96,8 +97,6 @@ const TAG_CACHE_MS = 15 * 60_000;
 const OFFLINE_WINDOW_MS = 48 * 3600_000;
 const ECHO_WINDOW_MS = 2 * 60_000;
 const RESTRICTION_FALLBACK_MS = 24 * 3600_000;
-const HISTORY_BACKFILL_DAYS = 3;
-
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 // Every check passes the number's own policy (effectivePolicy); the built-in one is only the fallback.
@@ -216,12 +215,15 @@ export function startInstance(id: string, options: { fresh?: boolean; historyBac
     const meta = registry.instances[id];
     if (!meta) throw new Error('Instance not found');
     if (options.historyBackfillDays !== undefined) {
-      if (options.historyBackfillDays !== HISTORY_BACKFILL_DAYS) throw new Error(`History backfill is limited to ${HISTORY_BACKFILL_DAYS} days`);
-      meta.historyBackfillSince = Date.now() - HISTORY_BACKFILL_DAYS * 24 * 3600_000;
+      if (!isValidHistoryBackfillDays(options.historyBackfillDays)) {
+        throw new Error(`History backfill must be between 1 and ${MAX_HISTORY_BACKFILL_DAYS} days`);
+      }
+      meta.historyBackfillSince = Date.now() - options.historyBackfillDays * 24 * 3600_000;
       meta.historyBackfillStatus = 'awaiting-pairing';
       meta.historyBackfillCount = 0;
+      meta.historyBackfillDays = options.historyBackfillDays;
       await save();
-      recordEvent('info', `Starting a ${HISTORY_BACKFILL_DAYS}-day WhatsApp history backfill for #${meta.slot} ${meta.name}; scan the new QR code to continue`, {
+      recordEvent('info', `Starting a ${options.historyBackfillDays}-day WhatsApp history backfill for #${meta.slot} ${meta.name}; scan the new QR code to continue`, {
         instanceId: id,
         locationId: meta.locationId
       });
@@ -310,7 +312,7 @@ async function openSession(id: string, fresh: boolean) {
     current.historyBackfillStatus = 'complete';
     current.updatedAt = new Date().toISOString();
     void save();
-    recordEvent('info', `WhatsApp history backfill finished for #${current.slot} ${current.name}: ${count} messages from the last ${HISTORY_BACKFILL_DAYS} days were received`, {
+    recordEvent('info', `WhatsApp history backfill finished for #${current.slot} ${current.name}: ${count} messages from the last ${current.historyBackfillDays || 1} days were received`, {
       instanceId: id,
       locationId: current.locationId
     });

@@ -326,6 +326,9 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
   const [showQr, setShowQr] = useState(true);
   const [managing, setManaging] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [backfillDays, setBackfillDays] = useState('');
+  const parsedBackfillDays = Number(backfillDays);
+  const validBackfillDays = Number.isInteger(parsedBackfillDays) && parsedBackfillDays >= 1 && parsedBackfillDays <= 30;
   const url = `/api/instances/${encodeURIComponent(n.id)}`;
 
   return (
@@ -357,10 +360,10 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
         {n.historyBackfillStatus && (
           <div className="loc-ghl">
             {n.historyBackfillStatus === 'awaiting-pairing'
-              ? 'History backfill is waiting for a QR scan.'
+              ? `History backfill for the last ${n.historyBackfillDays || 1} days is waiting for a QR scan.`
               : n.historyBackfillStatus === 'syncing'
-                ? `Receiving recent WhatsApp history (${n.historyBackfillCount} messages found).`
-                : `Backfill finished: WhatsApp supplied ${n.historyBackfillCount} messages from the last 3 days.`}
+                ? `Receiving WhatsApp history from the last ${n.historyBackfillDays || 1} days (${n.historyBackfillCount} messages found).`
+                : `Backfill finished: WhatsApp supplied ${n.historyBackfillCount} messages from the last ${n.historyBackfillDays || 1} days.`}
           </div>
         )}
       </div>
@@ -398,18 +401,30 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
           </button>
         )}
         {!n.historyBackfillStatus && (
-          <button
-            className="secondary small"
-            disabled={!n.ghlConnected}
-            title={!n.ghlConnected ? 'Connect GHL before backfilling messages.' : undefined}
-            onClick={() =>
-              confirm(
-                `Backfill the last 3 days for ${n.name}? This unlinks the current WhatsApp device and requires scanning a new QR. Only history WhatsApp provides will be imported.`
-              ) && void run(() => call(url, 'POST', { historyBackfillDays: 3 }))
-            }
-          >
-            Backfill 3 days
-          </button>
+          <span className="inline-edit">
+            <input
+              aria-label={`History days to backfill for ${n.name}`}
+              type="number"
+              min={1}
+              max={30}
+              step={1}
+              placeholder="Days"
+              value={backfillDays}
+              onChange={e => setBackfillDays(e.target.value)}
+            />
+            <button
+              className="secondary small"
+              disabled={!n.ghlConnected || !validBackfillDays}
+              title={!n.ghlConnected ? 'Connect GHL before backfilling messages.' : 'Choose 1 to 30 days.'}
+              onClick={() =>
+                confirm(
+                  `Backfill the last ${parsedBackfillDays} days for ${n.name}? This unlinks the current WhatsApp device and requires scanning a new QR. Only history WhatsApp provides will be imported.`
+                ) && void run(() => call(url, 'POST', { historyBackfillDays: parsedBackfillDays }))
+              }
+            >
+              Backfill
+            </button>
+          </span>
         )}
         <button className="danger small" onClick={() => confirm(`Delete ${n.name} and unlink it from WhatsApp?`) && void run(() => call(url, 'DELETE'))}>
           Delete

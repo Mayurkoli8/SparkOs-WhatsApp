@@ -26,6 +26,7 @@ export type NumberInfo = {
   linkedAt: string | null;
   historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'complete' | null;
   historyBackfillCount: number;
+  historyBackfillDays: number | null;
   ghlConnected: boolean;
   restrictedUntil: number | null;
   protection: Protection;
