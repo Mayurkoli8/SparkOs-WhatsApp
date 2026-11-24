@@ -24,6 +24,9 @@ export type NumberInfo = {
   slot: number | null;
   isDefault: boolean;
   linkedAt: string | null;
+  historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'complete' | null;
+  historyBackfillCount: number;
+  ghlConnected: boolean;
   restrictedUntil: number | null;
   protection: Protection;
   policy: Policy;

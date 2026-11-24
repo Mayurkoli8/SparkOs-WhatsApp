@@ -11,12 +11,12 @@ import makeWASocket, {
   type AnyMessageContent,
   type AuthenticationCreds,
   type ConnectionState,
-  type proto,
   type ReachoutTimelockState,
   type WAMessage,
   type WAMessageKey,
   type WAMessageUpdate,
-  type WASocket
+  type WASocket,
+  proto
 } from '@whiskeysockets/baileys';
 import { DATA_DIR, MAX_MEDIA_BYTES, SYNC_PHONE_MESSAGES } from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
@@ -34,7 +34,9 @@ import {
   extractContent,
   fileNameFromUrl,
   ghlStatusFromWa,
+  isWithinHistoryWindow,
   isDirectChatJid,
+  messageTimestampMs,
   mediaLabel,
   resolvePhone,
   serializeMessage,
@@ -94,6 +96,7 @@ const TAG_CACHE_MS = 15 * 60_000;
 const OFFLINE_WINDOW_MS = 48 * 3600_000;
 const ECHO_WINDOW_MS = 2 * 60_000;
 const RESTRICTION_FALLBACK_MS = 24 * 3600_000;
+const HISTORY_BACKFILL_DAYS = 3;
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -208,8 +211,23 @@ function withInstanceLock(id: string, task: () => Promise<void>) {
   return run;
 }
 
-export function startInstance(id: string, options: { fresh?: boolean } = {}) {
-  return withInstanceLock(id, () => openSession(id, options.fresh === true));
+export function startInstance(id: string, options: { fresh?: boolean; historyBackfillDays?: number } = {}) {
+  return withInstanceLock(id, async () => {
+    const meta = registry.instances[id];
+    if (!meta) throw new Error('Instance not found');
+    if (options.historyBackfillDays !== undefined) {
+      if (options.historyBackfillDays !== HISTORY_BACKFILL_DAYS) throw new Error(`History backfill is limited to ${HISTORY_BACKFILL_DAYS} days`);
+      meta.historyBackfillSince = Date.now() - HISTORY_BACKFILL_DAYS * 24 * 3600_000;
+      meta.historyBackfillStatus = 'awaiting-pairing';
+      meta.historyBackfillCount = 0;
+      await save();
+      recordEvent('info', `Starting a ${HISTORY_BACKFILL_DAYS}-day WhatsApp history backfill for #${meta.slot} ${meta.name}; scan the new QR code to continue`, {
+        instanceId: id,
+        locationId: meta.locationId
+      });
+    }
+    await openSession(id, options.fresh === true || options.historyBackfillDays !== undefined);
+  });
 }
 
 function detachSession(id: string) {
@@ -246,11 +264,12 @@ async function openSession(id: string, fresh: boolean) {
 
   const sock = makeWASocket({
     auth: state,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: meta.historyBackfillSince ? Browsers.macOS('Desktop') : Browsers.ubuntu('Chrome'),
     logger: baileysLogger,
     // Staying "offline" keeps notifications flowing to the phone.
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    syncFullHistory: Boolean(meta.historyBackfillSince),
+    shouldSyncHistoryMessage: ({ syncType }) => syncType !== proto.HistorySync.HistorySyncType.FULL,
     // Our own sends must not come back through messages.upsert; every fromMe upsert is then a phone-typed message.
     emitOwnEvents: false,
     getMessage: async key => (key.id ? sentMessages.get(key.id) : undefined)
@@ -267,6 +286,34 @@ async function openSession(id: string, fresh: boolean) {
   sock.ev.on('messages.upsert', ({ messages, type }) => {
     if (!isCurrent()) return;
     for (const message of messages) queueIncoming(id, sock, message, type);
+  });
+  sock.ev.on('messaging-history.set', ({ messages }) => {
+    if (!isCurrent() || !registry.instances[id]?.historyBackfillSince) return;
+    const current = registry.instances[id];
+    let count = 0;
+    for (const message of messages) {
+      if (queueIncoming(id, sock, message, 'append', true)) count++;
+    }
+    if (count) {
+      current.historyBackfillStatus = 'syncing';
+      current.historyBackfillCount = (current.historyBackfillCount || 0) + count;
+      current.updatedAt = new Date().toISOString();
+      void save();
+    }
+  });
+  sock.ev.on('messaging-history.status', ({ syncType }) => {
+    if (!isCurrent() || syncType !== proto.HistorySync.HistorySyncType.RECENT) return;
+    const current = registry.instances[id];
+    if (!current?.historyBackfillSince) return;
+    const count = current.historyBackfillCount || 0;
+    delete current.historyBackfillSince;
+    current.historyBackfillStatus = 'complete';
+    current.updatedAt = new Date().toISOString();
+    void save();
+    recordEvent('info', `WhatsApp history backfill finished for #${current.slot} ${current.name}: ${count} messages from the last ${HISTORY_BACKFILL_DAYS} days were received`, {
+      instanceId: id,
+      locationId: current.locationId
+    });
   });
   sock.ev.on('messages.update', updates => {
     if (isCurrent()) void syncReceipts(id, updates);
@@ -457,28 +504,24 @@ export function shutdown() {
   }
 }
 
-function timestampMs(msg: WAMessage) {
-  const raw = msg.messageTimestamp as unknown;
-  if (raw == null) return undefined;
-  const seconds = typeof raw === 'object' && typeof (raw as { toNumber?: unknown }).toNumber === 'function' ? (raw as { toNumber: () => number }).toNumber() : Number(raw);
-  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
-}
-
-function queueIncoming(instanceId: string, sock: WASocket, msg: WAMessage, type: 'notify' | 'append') {
+function queueIncoming(instanceId: string, sock: WASocket, msg: WAMessage, type: 'notify' | 'append', historical = false) {
   const { key } = msg;
-  if (!key.id || !msg.message || !isDirectChatJid(key.remoteJid)) return;
-  if (key.fromMe && !SYNC_PHONE_MESSAGES) return;
+  if (!key.id || !msg.message || !isDirectChatJid(key.remoteJid)) return false;
+  if (key.fromMe && !SYNC_PHONE_MESSAGES && !historical) return false;
   // "append" carries messages that arrived while this worker was offline; take recent ones, skip old backlog.
-  const sentAt = timestampMs(msg);
-  if (type === 'append' && (!sentAt || Date.now() - sentAt > OFFLINE_WINDOW_MS)) return;
+  const sentAt = messageTimestampMs(msg);
+  const instance = registry.instances[instanceId];
+  if (historical && (!instance?.historyBackfillSince || !isWithinHistoryWindow(msg, instance.historyBackfillSince))) return false;
+  if (!historical && type === 'append' && (!sentAt || Date.now() - sentAt > OFFLINE_WINDOW_MS)) return false;
   // The retry queue survives restarts (seenMessages does not), so a message waiting there is never synced twice.
-  if (seenMessages.has(key.id) || pendingSync.has(key.id)) return;
+  if (seenMessages.has(key.id) || pendingSync.has(key.id)) return false;
   const content = extractContent(msg.message);
-  if (!content) return;
+  if (!content) return false;
   seenMessages.set(key.id, true);
-  void inChat(`${instanceId}|${key.remoteJid}`, () => syncToGhl(instanceId, sock, msg, content)).catch(err =>
+  void inChat(`${instanceId}|${key.remoteJid}`, () => syncToGhl(instanceId, sock, msg, content, historical)).catch(err =>
     recordEvent('error', 'Failed to sync a WhatsApp message to HighLevel', { instanceId, locationId: registry.instances[instanceId]?.locationId, detail: describeError(err) })
   );
+  return true;
 }
 
 // Messages of one chat are pushed in order; different chats run in parallel.
@@ -514,7 +557,7 @@ async function resolveContact(locationId: string, phone: string, displayName?: s
 }
 
 // First sight of a WhatsApp message: protection bookkeeping happens once, then the HighLevel push (retried if needed).
-async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, content: ExtractedContent) {
+async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, content: ExtractedContent, historical = false) {
   const meta = registry.instances[instanceId];
   if (!meta) return;
   const { locationId } = meta;
@@ -528,20 +571,22 @@ async function syncToGhl(instanceId: string, sock: WASocket, msg: WAMessage, con
     return;
   }
   // Someone who wrote to this number can always be answered from it; a chat typed on the phone counts as a send.
-  if (direction === 'inbound') {
-    protection.markInbound(instanceId, phone, Date.now());
-    rememberUnread(instanceId, phone, msg.key);
-  } else {
-    protection.recordSend(instanceId, phone, Date.now());
+  if (!historical) {
+    if (direction === 'inbound') {
+      protection.markInbound(instanceId, phone, Date.now());
+      rememberUnread(instanceId, phone, msg.key);
+    } else {
+      protection.recordSend(instanceId, phone, Date.now());
+    }
+    saveProtectionSoon();
   }
-  saveProtectionSoon();
   if (!ghl.isConnected(locationId)) {
     recordEvent('warn', `WhatsApp message ${direction === 'inbound' ? 'from' : 'to'} ${maskPhone(phone)} was not synced: location ${locationId} is not connected to HighLevel yet`, context);
     return;
   }
   if (direction === 'outbound' && content.text.trim()) recentPhoneSends.set(phoneSendKey(locationId, phone, content.text), Date.now());
 
-  const sentAt = timestampMs(msg);
+  const sentAt = messageTimestampMs(msg);
   try {
     await pushToGhl(instanceId, sock, msg, content, phone, direction, sentAt);
   } catch (err) {

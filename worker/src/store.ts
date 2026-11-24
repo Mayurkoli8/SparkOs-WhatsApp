@@ -19,6 +19,9 @@ export type InstanceRecord = {
   slot?: number;
   isDefault?: boolean;
   linkedAt?: string | null;
+  historyBackfillSince?: number;
+  historyBackfillStatus?: 'awaiting-pairing' | 'syncing' | 'complete';
+  historyBackfillCount?: number;
   // WhatsApp stops this number from starting new chats until then (epoch ms).
   restrictedUntil?: number | null;
   // Admin overrides of the protection defaults (unset fields follow the defaults), and a restarted warm-up.

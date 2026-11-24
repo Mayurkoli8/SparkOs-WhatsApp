@@ -229,7 +229,7 @@ function SubAccounts({ locations, defaults, run }: { locations: Location[]; defa
       <section className="panel add-number">
         <div className="field">
           <label>Sub-account (Location ID)</label>
-          <input value={locationId} onChange={e => setLocationId(e.target.value)} placeholder="e.g. TX9KRMZh1GWrjsLyD391" list="known-locations" />
+          <input value={locationId} onChange={e => setLocationId(e.target.value)} placeholder="e.g. a HighLevel Location ID" list="known-locations" />
           <datalist id="known-locations">
             {locations.map(l => (
               <option key={l.locationId} value={l.locationId} />
@@ -354,6 +354,15 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
           {n.assignedUserId && <> · owner {n.assignedUserName || n.assignedUserId}</>}
         </div>
         {n.lastError && DOWN.has(n.status) && <div className="lasterror">{n.lastError}</div>}
+        {n.historyBackfillStatus && (
+          <div className="loc-ghl">
+            {n.historyBackfillStatus === 'awaiting-pairing'
+              ? 'History backfill is waiting for a QR scan.'
+              : n.historyBackfillStatus === 'syncing'
+                ? `Receiving recent WhatsApp history (${n.historyBackfillCount} messages found).`
+                : `Backfill finished: WhatsApp supplied ${n.historyBackfillCount} messages from the last 3 days.`}
+          </div>
+        )}
       </div>
       <div className="actions">
         <button className={managing ? 'secondary small' : 'ghost small'} onClick={() => setManaging(!managing)}>
@@ -386,6 +395,20 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
         {n.status === 'connected' && (
           <button className="ghost small" onClick={() => confirm('Unlink this WhatsApp login and show a new QR code?') && void run(() => call(url, 'POST', { fresh: true }))}>
             New QR
+          </button>
+        )}
+        {!n.historyBackfillStatus && (
+          <button
+            className="secondary small"
+            disabled={!n.ghlConnected}
+            title={!n.ghlConnected ? 'Connect GHL before backfilling messages.' : undefined}
+            onClick={() =>
+              confirm(
+                `Backfill the last 3 days for ${n.name}? This unlinks the current WhatsApp device and requires scanning a new QR. Only history WhatsApp provides will be imported.`
+              ) && void run(() => call(url, 'POST', { historyBackfillDays: 3 }))
+            }
+          >
+            Backfill 3 days
           </button>
         )}
         <button className="danger small" onClick={() => confirm(`Delete ${n.name} and unlink it from WhatsApp?`) && void run(() => call(url, 'DELETE'))}>

@@ -6,6 +6,8 @@ import {
   extractContent,
   ghlStatusFromWa,
   isDirectChatJid,
+  isWithinHistoryWindow,
+  messageTimestampMs,
   mediaLabel,
   serializeMessage,
   resolvePhone,
@@ -13,6 +15,16 @@ import {
 } from '../src/wa-message';
 
 const noMapping = async () => null;
+
+test('history backfill timestamp filtering includes only dated messages in the requested interval', () => {
+  const now = 1_800_000_000_000;
+  const since = now - 3 * 24 * 60 * 60_000;
+  assert.equal(isWithinHistoryWindow({ messageTimestamp: since / 1000 }, since, now), true);
+  assert.equal(isWithinHistoryWindow({ messageTimestamp: (since - 1000) / 1000 }, since, now), false);
+  assert.equal(isWithinHistoryWindow({ messageTimestamp: (now + 1000) / 1000 }, since, now), false);
+  assert.equal(isWithinHistoryWindow({}, since, now), false);
+  assert.equal(messageTimestampMs({ messageTimestamp: since / 1000 }), since);
+});
 
 test('resolvePhone returns the number for phone-number (PN) chats', async () => {
   assert.equal(await resolvePhone({ remoteJid: '919876543210@s.whatsapp.net', fromMe: false }, noMapping), '919876543210');

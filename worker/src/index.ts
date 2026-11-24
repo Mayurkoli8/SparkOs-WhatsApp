@@ -83,6 +83,8 @@ const publicInstance = (instance: InstanceRecord) => {
     updatedAt,
     qr: qr || null,
     lastError: lastError || null,
+    historyBackfillStatus: instance.historyBackfillStatus || null,
+    historyBackfillCount: instance.historyBackfillCount || 0,
     slot: slot ?? null,
     isDefault: Boolean(isDefault),
     linkedAt: linkedAt || null,
@@ -316,7 +318,11 @@ app.delete('/locations/:locationId', async (req, res) => {
 app.post('/instances/:id/restart', async (req, res) => {
   try {
     if (!registry.instances[req.params.id]) return res.status(404).json({ error: 'Not found' });
-    await bridge.startInstance(req.params.id, { fresh: req.body?.fresh === true });
+    const historyBackfillDays = req.body?.historyBackfillDays;
+    if (historyBackfillDays !== undefined && historyBackfillDays !== 3) {
+      return res.status(400).json({ error: 'historyBackfillDays must be 3' });
+    }
+    await bridge.startInstance(req.params.id, { fresh: req.body?.fresh === true, historyBackfillDays });
     res.json({ ok: true, instance: publicInstance(registry.instances[req.params.id]) });
   } catch (err) {
     sendError(res, err);

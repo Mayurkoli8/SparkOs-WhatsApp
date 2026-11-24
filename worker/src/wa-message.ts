@@ -10,6 +10,18 @@ export function isDirectChatJid(jid: string | null | undefined): jid is string {
   return Boolean(jid && (isPnUser(jid) || isLidUser(jid)));
 }
 
+export function messageTimestampMs(msg: Pick<WAMessage, 'messageTimestamp'>) {
+  const raw = msg.messageTimestamp as unknown;
+  if (raw == null) return undefined;
+  const seconds = typeof raw === 'object' && typeof (raw as { toNumber?: unknown }).toNumber === 'function' ? (raw as { toNumber: () => number }).toNumber() : Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
+}
+
+export function isWithinHistoryWindow(msg: Pick<WAMessage, 'messageTimestamp'>, since: number, now = Date.now()) {
+  const timestamp = messageTimestampMs(msg);
+  return Boolean(timestamp && timestamp >= since && timestamp <= now);
+}
+
 function userPart(jid: string | null | undefined) {
   return (jid && jidDecode(jid)?.user) || null;
 }
