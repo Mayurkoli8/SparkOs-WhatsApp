@@ -73,6 +73,7 @@ export type CompanyConnection = {
   scope?: string;
   userId?: string;
   locationIds: string[];
+  disconnectedLocationIds?: string[];
   mintErrors: Record<string, string>;
   updatedAt: string;
   lastError?: string | null;

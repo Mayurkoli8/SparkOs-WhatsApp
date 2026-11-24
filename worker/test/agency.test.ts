@@ -143,3 +143,45 @@ test('an agency token is refreshed with user_type Company', async () => {
   assert.equal(refresh.body.refresh_token, 'agency-refresh');
   assert.equal(decrypt(registry.companies.CO1.refreshToken!), 'agency-refresh-2');
 });
+
+test('disconnecting an agency location blocks fallback until it is explicitly reconnected', async () => {
+  await ghl.saveAgencyConnection({
+    companyId: 'CO1',
+    accessToken: 'agency-token',
+    refreshToken: 'agency-refresh',
+    expiresIn: 86399,
+    scope: AGENCY_SCOPES,
+    locationIds: ['LOC1', 'LOC2']
+  });
+  registry.settings.limits = { LOC1: 7 };
+  registry.settings.providers = { LOC1: 'provider-1' };
+  registry.settings.inboundTypes = { LOC1: 'SMS' };
+  on('POST', '/oauth/locationToken', call => ({
+    json: { access_token: `token-${call.body.locationId}`, expires_in: 86399 }
+  }));
+  await ghl.getAccessToken('LOC1');
+  await ghl.getAccessToken('LOC2');
+
+  await ghl.disconnectLocation('LOC1');
+
+  assert.equal(ghl.isConnected('LOC1'), false);
+  assert.equal(ghl.isConnected('LOC2'), true);
+  assert.equal(registry.ghl.LOC1, undefined);
+  assert.deepEqual(registry.companies.CO1.locationIds, ['LOC2']);
+  assert.deepEqual(registry.companies.CO1.disconnectedLocationIds, ['LOC1']);
+  assert.equal(registry.settings.limits!.LOC1, undefined);
+  assert.equal(registry.settings.providers!.LOC1, undefined);
+  assert.equal(registry.settings.inboundTypes!.LOC1, undefined);
+  await assert.rejects(ghl.getAccessToken('LOC1'), ghl.GhlNotConnectedError);
+
+  await ghl.saveAgencyConnection({
+    companyId: 'CO1',
+    accessToken: 'agency-token-2',
+    refreshToken: 'agency-refresh-2',
+    expiresIn: 86399,
+    scope: AGENCY_SCOPES,
+    locationIds: ['LOC1']
+  });
+  assert.equal(ghl.isConnected('LOC1'), true);
+  assert.deepEqual(registry.companies.CO1.disconnectedLocationIds, []);
+});

@@ -155,8 +155,11 @@ async function refreshRecord(record: TokenRecord, userType: 'Location' | 'Compan
 // The agency (Company) install that can mint tokens for this location, if any.
 function agencyFor(locationId: string): CompanyConnection | undefined {
   const linked = registry.ghl[locationId]?.companyId;
-  if (linked && registry.companies[linked]) return registry.companies[linked];
-  const companies = Object.values(registry.companies);
+  if (linked && registry.companies[linked]) {
+    const company = registry.companies[linked];
+    return company.disconnectedLocationIds?.includes(locationId) ? undefined : company;
+  }
+  const companies = Object.values(registry.companies).filter(c => !c.disconnectedLocationIds?.includes(locationId));
   return companies.find(c => c.locationIds.includes(locationId)) || (companies.length === 1 ? companies[0] : undefined);
 }
 
@@ -315,6 +318,8 @@ export async function saveAgencyConnection(input: {
   locationIds?: string[];
 }) {
   const previous = registry.companies[input.companyId];
+  const disconnectedLocationIds = new Set(previous?.disconnectedLocationIds || []);
+  for (const locationId of input.locationIds || []) disconnectedLocationIds.delete(locationId);
   registry.companies[input.companyId] = {
     companyId: input.companyId,
     accessToken: encrypt(input.accessToken),
@@ -323,6 +328,7 @@ export async function saveAgencyConnection(input: {
     scope: input.scope,
     userId: input.userId,
     locationIds: [...new Set([...(previous?.locationIds || []), ...(input.locationIds || [])])],
+    disconnectedLocationIds: [...disconnectedLocationIds],
     mintErrors: {},
     updatedAt: new Date().toISOString()
   };
@@ -389,6 +395,30 @@ export async function saveConnection(input: {
     source: 'direct',
     updatedAt: new Date().toISOString()
   };
+  await save();
+}
+
+export async function disconnectLocation(locationId: string) {
+  const connection = registry.ghl[locationId];
+  delete registry.ghl[locationId];
+
+  const companies = Object.values(registry.companies);
+  for (const company of companies) {
+    const associated =
+      company.companyId === connection?.companyId ||
+      company.locationIds.includes(locationId) ||
+      companies.length === 1;
+    if (!associated) continue;
+    company.locationIds = company.locationIds.filter(id => id !== locationId);
+    company.disconnectedLocationIds = [...new Set([...(company.disconnectedLocationIds || []), locationId])];
+    if (company.mintErrors) delete company.mintErrors[locationId];
+  }
+
+  if (!Object.values(registry.instances).some(instance => instance.locationId === locationId)) {
+    if (registry.settings.limits) delete registry.settings.limits[locationId];
+    if (registry.settings.providers) delete registry.settings.providers[locationId];
+    if (registry.settings.inboundTypes) delete registry.settings.inboundTypes[locationId];
+  }
   await save();
 }
 

@@ -296,6 +296,16 @@ function LocationCard({ location, defaults, run }: { location: Location; default
           <a className="ghost small linkbtn" href={`/subaccount/${encodeURIComponent(locationId)}`} target="_blank" rel="noreferrer">
             Sub-account page ↗
           </a>
+          <button
+            className="danger small"
+            onClick={() =>
+              confirm(
+                `Disconnect GHL for ${locationId}? WhatsApp numbers will be left alone. If there are no numbers, this sub-account will be removed from the admin list.`
+              ) && void run(() => call(`/api/admin/locations/${encodeURIComponent(locationId)}`, 'DELETE'))
+            }
+          >
+            Disconnect GHL
+          </button>
         </div>
       </div>
 

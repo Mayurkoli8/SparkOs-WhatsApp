@@ -303,6 +303,16 @@ app.put('/locations/:locationId/limit', async (req, res) => {
   res.json({ locationId: req.params.locationId, limit });
 });
 
+app.delete('/locations/:locationId', async (req, res) => {
+  try {
+    await ghl.disconnectLocation(req.params.locationId);
+    recordEvent('warn', `HighLevel disconnected for location ${req.params.locationId}`, { locationId: req.params.locationId });
+    res.json({ ok: true });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 app.post('/instances/:id/restart', async (req, res) => {
   try {
     if (!registry.instances[req.params.id]) return res.status(404).json({ error: 'Not found' });
