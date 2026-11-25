@@ -207,9 +207,14 @@ export default function SubaccountView({ locationId }: { locationId: string }) {
                       )}
                     </div>
                   ) : null}
-                  {!n.qr && (n.status === 'starting' || n.status === 'connecting') && (
+                  {!n.qr && (n.status === 'starting' || n.status === 'connecting' || n.status === 'reconnecting') && (
                     <div className="sa-qrbox">
-                      <div className="sa-state"><span className="sa-spinner" /> Generating a WhatsApp QR code…</div>
+                      <div className="sa-state">
+                        <span className="sa-spinner" />{' '}
+                        {n.status === 'reconnecting'
+                          ? 'WhatsApp connection closed; reconnecting. A new QR will appear if needed…'
+                          : 'Generating a WhatsApp QR code…'}
+                      </div>
                     </div>
                   )}
 

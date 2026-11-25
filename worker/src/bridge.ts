@@ -373,7 +373,11 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
 
   if (update.qr) {
     const dataUrl = await QRCode.toDataURL(update.qr, { width: 360, margin: 2 });
-    if (sessions.get(id) === session) updateInstance(id, { status: 'qr', qr: dataUrl, lastError: null });
+    if (sessions.get(id) === session) {
+      const waitingForQr = registry.instances[id]?.status !== 'qr';
+      updateInstance(id, { status: 'qr', qr: dataUrl, lastError: null });
+      if (waitingForQr) recordEvent('info', `WhatsApp QR code is ready for #${meta.slot} ${meta.name}`, context);
+    }
   }
 
   if (update.reachoutTimeLock) applyRestriction(id, update.reachoutTimeLock);
@@ -413,6 +417,13 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
   const code = error?.output?.statusCode;
   const reason = error?.message || 'Connection closed';
   const paired = Boolean(session.creds.me?.id);
+  recordEvent(
+    code === DisconnectReason.restartRequired ? 'info' : 'warn',
+    code === DisconnectReason.restartRequired
+      ? `WhatsApp is restarting the session for #${meta.slot} ${meta.name}`
+      : `WhatsApp connection closed for #${meta.slot} ${meta.name}; reconnecting`,
+    { ...context, detail: `code=${code ?? 'unknown'}; paired=${paired}; ${reason}` }
+  );
 
   if (code === DisconnectReason.loggedOut) {
     // The credentials are dead; wipe them so the next start shows a fresh QR instead of failing again.

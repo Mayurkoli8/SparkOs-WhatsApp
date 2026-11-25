@@ -379,7 +379,7 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
           {formatPhone(n.phone) || 'not linked yet'} · <span className={n.protection.restricted || !n.protection.enabled ? 'warnText' : ''}>{protectionText(n)}</span>
           {n.assignedUserId && <> · owner {n.assignedUserName || n.assignedUserId}</>}
         </div>
-        {n.lastError && DOWN.has(n.status) && <div className="lasterror">{n.lastError}</div>}
+        {n.lastError && <div className="lasterror">{n.lastError}</div>}
         {n.historyBackfillStatus && (
           <div className="history-backfill">
             {n.historyBackfillStatus === 'awaiting-pairing'
@@ -476,9 +476,9 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
           <div>WhatsApp → Linked devices → Link a device. The code refreshes about every 20 seconds.</div>
         </div>
       )}
-      {!n.qr && (n.status === 'qr' || n.status === 'starting' || n.status === 'connecting') && (
+      {!n.qr && (n.status === 'qr' || n.status === 'starting' || n.status === 'connecting' || n.status === 'reconnecting') && (
         <div className="qrbox">
-          <div>Generating a WhatsApp QR code…</div>
+          <div>{n.status === 'reconnecting' ? 'WhatsApp connection closed; reconnecting. A new QR will appear if needed…' : 'Generating a WhatsApp QR code…'}</div>
         </div>
       )}
       {managing && <NumberControls n={n} defaults={defaults} run={run} />}
