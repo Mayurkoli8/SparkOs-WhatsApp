@@ -34,8 +34,12 @@ export default function SubaccountView({ locationId }: { locationId: string }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [newName, setNewName] = useState('');
+  const [backfillOnConnect, setBackfillOnConnect] = useState(false);
+  const [backfillDays, setBackfillDays] = useState('');
   const [renaming, setRenaming] = useState<{ slot: number; name: string } | null>(null);
   const api = `/api/subaccount/${encodeURIComponent(locationId)}`;
+  const parsedBackfillDays = Number(backfillDays);
+  const validBackfillDays = Number.isInteger(parsedBackfillDays) && parsedBackfillDays >= 1 && parsedBackfillDays <= 30;
 
   const apply = useCallback(async (res: Response) => {
     const data = await res.json().catch(() => ({}));
@@ -72,7 +76,18 @@ export default function SubaccountView({ locationId }: { locationId: string }) {
   }
 
   async function add() {
-    if (await act('add', 'POST', { action: 'add', name: newName.trim() })) setNewName('');
+    if (backfillOnConnect && !validBackfillDays) return;
+    if (
+      await act('add', 'POST', {
+        action: 'add',
+        name: newName.trim(),
+        ...(backfillOnConnect ? { historyBackfillDays: parsedBackfillDays } : {})
+      })
+    ) {
+      setNewName('');
+      setBackfillOnConnect(false);
+      setBackfillDays('');
+    }
   }
 
   async function saveName() {
@@ -182,11 +197,39 @@ export default function SubaccountView({ locationId }: { locationId: string }) {
         {view && (
           <div className="sa-add">
             <input value={newName} maxLength={40} placeholder={numbers.length ? 'Name, e.g. Support' : 'Name, e.g. Sales'} disabled={atLimit} onChange={e => setNewName(e.target.value)} />
-            <button className="sa-primary" disabled={atLimit || busy !== ''} onClick={() => void add()}>
+            <label className="sa-backfill-toggle">
+              <input
+                className="sa-checkbox"
+                type="checkbox"
+                checked={backfillOnConnect}
+                disabled={atLimit || busy !== ''}
+                onChange={e => setBackfillOnConnect(e.target.checked)}
+              />
+              Backfill history
+            </label>
+            {backfillOnConnect && (
+              <label className="sa-backfill-days">
+                Days (1–30)
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  step={1}
+                  value={backfillDays}
+                  disabled={atLimit || busy !== ''}
+                  onChange={e => setBackfillDays(e.target.value)}
+                />
+              </label>
+            )}
+            <button className="sa-primary" disabled={atLimit || busy !== '' || (backfillOnConnect && !validBackfillDays)} onClick={() => void add()}>
               {busy === 'add' ? 'Starting…' : numbers.length ? 'Add number' : 'Connect WhatsApp'}
             </button>
             <p className="sa-hint">
-              {atLimit ? `All ${view.limit} numbers are in use. Ask your administrator if you need more.` : `${numbers.length} of ${view.limit} numbers used.`}
+              {atLimit
+                ? `All ${view.limit} numbers are in use. Ask your administrator if you need more.`
+                : backfillOnConnect
+                  ? `WhatsApp will be asked for the last ${validBackfillDays ? parsedBackfillDays : 'chosen'} days of history when you scan the QR.`
+                  : `${numbers.length} of ${view.limit} numbers used.`}
             </p>
           </div>
         )}

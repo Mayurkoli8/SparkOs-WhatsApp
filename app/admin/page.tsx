@@ -217,11 +217,24 @@ export default function AdminPage() {
 function SubAccounts({ locations, defaults, run }: { locations: Location[]; defaults: Policy; run: Run }) {
   const [locationId, setLocationId] = useState('');
   const [name, setName] = useState('');
+  const [backfillOnConnect, setBackfillOnConnect] = useState(false);
+  const [backfillDays, setBackfillDays] = useState('');
+  const parsedBackfillDays = Number(backfillDays);
+  const validBackfillDays = Number.isInteger(parsedBackfillDays) && parsedBackfillDays >= 1 && parsedBackfillDays <= 30;
 
   async function add() {
-    if (!locationId.trim()) return;
-    await run(() => call('/api/instances', 'POST', { locationId: locationId.trim(), name: name.trim() }));
+    if (!locationId.trim() || (backfillOnConnect && !validBackfillDays)) return;
+    const result = await run(() =>
+      call('/api/instances', 'POST', {
+        locationId: locationId.trim(),
+        name: name.trim(),
+        ...(backfillOnConnect ? { historyBackfillDays: parsedBackfillDays } : {})
+      })
+    );
+    if (!result) return;
     setName('');
+    setBackfillOnConnect(false);
+    setBackfillDays('');
   }
 
   return (
@@ -240,7 +253,17 @@ function SubAccounts({ locations, defaults, run }: { locations: Location[]; defa
           <label>Number name</label>
           <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Sales" maxLength={40} />
         </div>
-        <button className="primary" disabled={!locationId.trim()} onClick={() => void add()}>
+        <label className="backfill-toggle">
+          <input type="checkbox" checked={backfillOnConnect} onChange={e => setBackfillOnConnect(e.target.checked)} />
+          Backfill history on first connection
+        </label>
+        {backfillOnConnect && (
+          <div className="field backfill-days-field">
+            <label>History days (1–30)</label>
+            <input type="number" min={1} max={30} step={1} value={backfillDays} onChange={e => setBackfillDays(e.target.value)} />
+          </div>
+        )}
+        <button className="primary" disabled={!locationId.trim() || (backfillOnConnect && !validBackfillDays)} onClick={() => void add()}>
           Add number
         </button>
       </section>

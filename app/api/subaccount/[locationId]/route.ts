@@ -54,6 +54,7 @@ async function respond(locationId: string) {
 // Pass the worker's own message through when it is meant for people (e.g. the number limit).
 async function relay(res: Response | null, locationId: string) {
   if (!res) return unavailable();
+  if (res.status === 400) return NextResponse.json({ error: (await res.json().catch(() => ({}))).error || 'Invalid request.' }, { status: 400 });
   if (res.status === 409) return NextResponse.json({ error: (await res.json().catch(() => ({}))).error || 'Not allowed.' }, { status: 409 });
   if (!res.ok) return unavailable();
   return respond(locationId);
@@ -76,11 +77,16 @@ export async function GET(_req: Request, { params }: C) {
 export async function POST(req: Request, { params }: C) {
   const { locationId } = await params;
   if (!LOCATION_ID.test(locationId)) return unknownLocation();
-  const { action, name, slot } = await req.json().catch(() => ({}));
+  const { action, name, slot, historyBackfillDays } = await req.json().catch(() => ({}));
   if (action === 'add') {
     const res = await workerFetch('/instances', {
       method: 'POST',
-      body: JSON.stringify({ locationId, name: typeof name === 'string' ? name : '', enforceLimit: true })
+      body: JSON.stringify({
+        locationId,
+        name: typeof name === 'string' ? name : '',
+        enforceLimit: true,
+        ...(historyBackfillDays !== undefined ? { historyBackfillDays } : {})
+      })
     }).catch(() => null);
     return relay(res, locationId);
   }

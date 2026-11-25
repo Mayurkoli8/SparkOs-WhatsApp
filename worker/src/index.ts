@@ -127,6 +127,10 @@ app.post('/instances', async (req, res) => {
   try {
     const locationId = String(req.body?.locationId || '').trim();
     if (!locationId) return res.status(400).json({ error: 'locationId is required' });
+    const historyBackfillDays = req.body?.historyBackfillDays;
+    if (historyBackfillDays !== undefined && !isValidHistoryBackfillDays(historyBackfillDays)) {
+      return res.status(400).json({ error: `historyBackfillDays must be a whole number from 1 to ${MAX_HISTORY_BACKFILL_DAYS}` });
+    }
     const existing = numbersOf(locationId);
     // Sub-account self-service respects the limit; the admin may go beyond it.
     if (req.body?.enforceLimit === true && existing.length >= limitFor(locationId)) {
@@ -148,7 +152,7 @@ app.post('/instances', async (req, res) => {
     };
     await save();
     if (!ghl.isConnected(locationId)) recordEvent('warn', `Instance created for ${locationId}, which is not connected to HighLevel yet`, { instanceId: id, locationId });
-    await bridge.startInstance(id);
+    await bridge.startInstance(id, { historyBackfillDays });
     res.json({ instance: publicInstance(registry.instances[id]) });
   } catch (err) {
     sendError(res, err);

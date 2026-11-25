@@ -60,6 +60,8 @@
 .sa-rename input{padding:6px 9px;width:160px}
 .sa-add{margin-top:18px;padding-top:16px;border-top:1px solid #eef1f5;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .sa-add input{flex:1;min-width:160px}.sa-add .sa-primary{margin-top:0}.sa-add .sa-hint{flex-basis:100%;margin:0}
+.sa-backfill-toggle{display:flex;align-items:center;gap:7px;color:#475569;font-size:13px}.sa-add input.sa-checkbox{flex:0 0 auto;min-width:0;width:16px;padding:0}
+.sa-backfill-days{display:flex;align-items:center;gap:7px;color:#475569;font-size:13px}.sa-add .sa-backfill-days input{flex:0 0 84px;min-width:84px}
 .login-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px}
 .login-card{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:28px;display:flex;flex-direction:column;gap:10px}
 .login-card label{font-size:11px;color:#aeb9cc;text-transform:uppercase;letter-spacing:.08em;margin-top:8px}
@@ -83,6 +85,8 @@
 .check.linkish:hover span:last-child{text-decoration:underline}
 .add-number{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px}
 .add-number .field{flex:1;min-width:200px;margin:0}
+.backfill-toggle{display:flex;align-items:center;gap:8px;color:#aeb9cc;font-size:12px}.backfill-toggle input{width:auto;margin:0;accent-color:var(--accent)}
+.add-number .backfill-days-field{flex:0 1 150px;min-width:130px}
 .loc-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;padding-bottom:12px;border-bottom:1px solid rgba(255,255,255,.07)}
 .loc-id{font-size:15px;font-weight:700}
 .loc-ghl{font-size:12px;margin-top:6px;color:#b9c5d9;max-width:640px;line-height:1.45}.loc-ghl.bad{color:#ffc3c3}
