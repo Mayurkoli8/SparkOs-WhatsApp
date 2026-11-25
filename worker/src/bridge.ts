@@ -267,7 +267,8 @@ async function openSession(id: string, fresh: boolean) {
 
   const sock = makeWASocket({
     auth: state,
-    browser: meta.historyBackfillSince ? Browsers.macOS('Desktop') : Browsers.ubuntu('Chrome'),
+    // WhatsApp rejects the WEB + DARWIN identity before QR pairing; Chrome keeps full-history sync enabled.
+    browser: meta.historyBackfillSince ? Browsers.macOS('Chrome') : Browsers.ubuntu('Chrome'),
     logger: baileysLogger,
     // Staying "offline" keeps notifications flowing to the phone.
     markOnlineOnConnect: false,
