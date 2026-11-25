@@ -381,12 +381,29 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
         </div>
         {n.lastError && DOWN.has(n.status) && <div className="lasterror">{n.lastError}</div>}
         {n.historyBackfillStatus && (
-          <div className="loc-ghl">
+          <div className="history-backfill">
             {n.historyBackfillStatus === 'awaiting-pairing'
               ? `History backfill for the last ${n.historyBackfillDays || 1} days is waiting for a QR scan.`
               : n.historyBackfillStatus === 'syncing'
-                ? `Receiving WhatsApp history from the last ${n.historyBackfillDays || 1} days (${n.historyBackfillCount} messages found).`
-                : `Backfill finished: WhatsApp supplied ${n.historyBackfillCount} messages from the last ${n.historyBackfillDays || 1} days.`}
+                ? n.historyBackfillProgress === null
+                  ? `Waiting for WhatsApp's history progress. ${n.historyBackfillCount} messages received so far.`
+                  : `WhatsApp history: ${n.historyBackfillProgress}% received, ${100 - n.historyBackfillProgress}% remaining. ${n.historyBackfillCount} messages received so far.`
+                : n.historyBackfillStatus === 'paused'
+                  ? `WhatsApp paused history transfer${n.historyBackfillProgress === null ? '' : ` at ${n.historyBackfillProgress}%`}. ${n.historyBackfillCount} messages received so far.`
+                  : `History transfer complete: ${n.historyBackfillCount} messages received from the last ${n.historyBackfillDays || 1} days.`}
+            {n.historyBackfillStatus !== 'awaiting-pairing' && (
+              <div
+                className={`history-progress${n.historyBackfillProgress === null ? ' indeterminate' : ''}`}
+                role="progressbar"
+                aria-label={`WhatsApp history received for ${n.name}`}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={n.historyBackfillProgress ?? undefined}
+                aria-valuetext={n.historyBackfillProgress === null ? 'Waiting for WhatsApp progress' : `${n.historyBackfillProgress}% received`}
+              >
+                <span style={{ width: n.historyBackfillProgress === null ? undefined : `${n.historyBackfillProgress}%` }} />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -394,7 +411,7 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
         <button className={managing ? 'secondary small' : 'ghost small'} onClick={() => setManaging(!managing)}>
           {managing ? 'Close' : 'Manage'}
         </button>
-        {n.status === 'qr' && (
+        {n.qr && (
           <button className="secondary small" onClick={() => setShowQr(!showQr)}>
             {showQr ? 'Hide QR' : 'Show QR'}
           </button>
@@ -453,16 +470,15 @@ function NumberRow({ n, defaults, run }: { n: NumberInfo; defaults: Policy; run:
           Delete
         </button>
       </div>
-      {n.status === 'qr' && showQr && (
+      {n.qr && showQr && (
         <div className="qrbox">
-          {n.qr ? (
-            <>
-              <img src={n.qr} alt={`QR code for ${n.name}`} />
-              <div>WhatsApp → Linked devices → Link a device. The code refreshes about every 20 seconds.</div>
-            </>
-          ) : (
-            <div className="muted">Generating a QR code…</div>
-          )}
+          <img src={n.qr} alt={`QR code for ${n.name}`} />
+          <div>WhatsApp → Linked devices → Link a device. The code refreshes about every 20 seconds.</div>
+        </div>
+      )}
+      {!n.qr && (n.status === 'qr' || n.status === 'starting' || n.status === 'connecting') && (
+        <div className="qrbox">
+          <div>Generating a WhatsApp QR code…</div>
         </div>
       )}
       {managing && <NumberControls n={n} defaults={defaults} run={run} />}

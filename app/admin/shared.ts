@@ -24,9 +24,10 @@ export type NumberInfo = {
   slot: number | null;
   isDefault: boolean;
   linkedAt: string | null;
-  historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'complete' | null;
+  historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'paused' | 'complete' | null;
   historyBackfillCount: number;
   historyBackfillDays: number | null;
+  historyBackfillProgress: number | null;
   ghlConnected: boolean;
   restrictedUntil: number | null;
   protection: Protection;

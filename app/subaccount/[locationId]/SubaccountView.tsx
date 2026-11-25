@@ -8,9 +8,14 @@ type NumberView = {
   phone: string | null;
   status: string;
   qr: string | null;
+  lastError: string | null;
   isDefault: boolean;
   restricted: boolean;
   warmingUp: boolean;
+  historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'paused' | 'complete' | null;
+  historyBackfillCount: number;
+  historyBackfillDays: number | null;
+  historyBackfillProgress: number | null;
 };
 type View = { locationId: string; ghlReady: boolean; limit: number; numbers: NumberView[] };
 
@@ -156,15 +161,55 @@ export default function SubaccountView({ locationId }: { locationId: string }) {
 
                   {n.restricted && <p className="sa-warn">WhatsApp is not letting this number start new chats for now. Chats with people who wrote first still work.</p>}
                   {!n.restricted && n.warmingUp && n.status === 'connected' && <p className="sa-hint">New number warming up: it can start only a few new chats per day for its first week.</p>}
+                  {n.lastError && <p className="sa-warn">{n.lastError}</p>}
+                  {n.historyBackfillStatus && (
+                    <div className="sa-history">
+                      <p className="sa-hint">
+                        {n.historyBackfillStatus === 'awaiting-pairing'
+                          ? `History backfill for the last ${n.historyBackfillDays || 1} days is waiting for the QR scan.`
+                          : n.historyBackfillStatus === 'syncing'
+                            ? n.historyBackfillProgress === null
+                              ? `Waiting for WhatsApp's history progress. ${n.historyBackfillCount} messages received so far.`
+                              : `WhatsApp history: ${n.historyBackfillProgress}% received, ${100 - n.historyBackfillProgress}% remaining. ${n.historyBackfillCount} messages received so far.`
+                            : n.historyBackfillStatus === 'paused'
+                              ? `WhatsApp paused history transfer${n.historyBackfillProgress === null ? '' : ` at ${n.historyBackfillProgress}%`}. ${n.historyBackfillCount} messages received so far.`
+                              : `History transfer complete: ${n.historyBackfillCount} messages received from the last ${n.historyBackfillDays || 1} days.`}
+                      </p>
+                      {n.historyBackfillStatus !== 'awaiting-pairing' && (
+                        <div
+                          className={`sa-progress${n.historyBackfillProgress === null ? ' indeterminate' : ''}`}
+                          role="progressbar"
+                          aria-label={`WhatsApp history received for ${n.name}`}
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={n.historyBackfillProgress ?? undefined}
+                          aria-valuetext={n.historyBackfillProgress === null ? 'Waiting for WhatsApp progress' : `${n.historyBackfillProgress}% received`}
+                        >
+                          <span style={{ width: n.historyBackfillProgress === null ? undefined : `${n.historyBackfillProgress}%` }} />
+                        </div>
+                      )}
+                    </div>
+                  )}
 
-                  {n.status === 'qr' && n.qr && (
+                  {n.qr || n.status === 'qr' ? (
                     <div className="sa-qrbox">
-                      <img className="sa-qr" src={n.qr} alt={`QR code for ${n.name}`} />
-                      <ol className="sa-steps">
-                        <li>Open WhatsApp on the phone with this number.</li>
-                        <li>Tap <b>Menu ⋮</b> (Android) or <b>Settings</b> (iPhone), then <b>Linked devices</b>.</li>
-                        <li>Tap <b>Link a device</b> and scan this code.</li>
-                      </ol>
+                      {n.qr ? (
+                        <>
+                          <img className="sa-qr" src={n.qr} alt={`QR code for ${n.name}`} />
+                          <ol className="sa-steps">
+                            <li>Open WhatsApp on the phone with this number.</li>
+                            <li>Tap <b>Menu ⋮</b> (Android) or <b>Settings</b> (iPhone), then <b>Linked devices</b>.</li>
+                            <li>Tap <b>Link a device</b> and scan this code.</li>
+                          </ol>
+                        </>
+                      ) : (
+                        <div className="sa-state"><span className="sa-spinner" /> Generating a WhatsApp QR code…</div>
+                      )}
+                    </div>
+                  ) : null}
+                  {!n.qr && (n.status === 'starting' || n.status === 'connecting') && (
+                    <div className="sa-qrbox">
+                      <div className="sa-state"><span className="sa-spinner" /> Generating a WhatsApp QR code…</div>
                     </div>
                   )}
 

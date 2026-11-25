@@ -20,7 +20,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import { DATA_DIR, MAX_MEDIA_BYTES, SYNC_PHONE_MESSAGES } from './config';
 import { errorText, log, maskPhone, recordEvent } from './events';
-import { isValidHistoryBackfillDays, MAX_HISTORY_BACKFILL_DAYS } from './history-backfill';
+import { isValidHistoryBackfillDays, MAX_HISTORY_BACKFILL_DAYS, normalizeHistoryProgress } from './history-backfill';
 import * as ghl from './ghl';
 import { assigneeFor, builtInPolicy, effectivePolicy, numbersOf, numberState, promoteDefault } from './numbers';
 import { ProtectionBook, typingDelayMs } from './protection';
@@ -222,6 +222,7 @@ export function startInstance(id: string, options: { fresh?: boolean; historyBac
       meta.historyBackfillStatus = 'awaiting-pairing';
       meta.historyBackfillCount = 0;
       meta.historyBackfillDays = options.historyBackfillDays;
+      delete meta.historyBackfillProgress;
       await save();
       recordEvent('info', `Starting a ${options.historyBackfillDays}-day WhatsApp history backfill for #${meta.slot} ${meta.name}; scan the new QR code to continue`, {
         instanceId: id,
@@ -289,27 +290,40 @@ async function openSession(id: string, fresh: boolean) {
     if (!isCurrent()) return;
     for (const message of messages) queueIncoming(id, sock, message, type);
   });
-  sock.ev.on('messaging-history.set', ({ messages }) => {
+  sock.ev.on('messaging-history.set', ({ messages, progress }) => {
     if (!isCurrent() || !registry.instances[id]?.historyBackfillSince) return;
     const current = registry.instances[id];
     let count = 0;
     for (const message of messages) {
       if (queueIncoming(id, sock, message, 'append', true)) count++;
     }
-    if (count) {
-      current.historyBackfillStatus = 'syncing';
-      current.historyBackfillCount = (current.historyBackfillCount || 0) + count;
-      current.updatedAt = new Date().toISOString();
-      void save();
+    current.historyBackfillStatus = 'syncing';
+    current.historyBackfillCount = (current.historyBackfillCount || 0) + count;
+    const reportedProgress = normalizeHistoryProgress(progress);
+    if (reportedProgress !== undefined) {
+      current.historyBackfillProgress = Math.max(current.historyBackfillProgress ?? 0, reportedProgress);
     }
+    current.updatedAt = new Date().toISOString();
+    void save();
   });
-  sock.ev.on('messaging-history.status', ({ syncType }) => {
+  sock.ev.on('messaging-history.status', ({ syncType, status, explicit }) => {
     if (!isCurrent() || syncType !== proto.HistorySync.HistorySyncType.RECENT) return;
     const current = registry.instances[id];
     if (!current?.historyBackfillSince) return;
+    if (status === 'paused') {
+      current.historyBackfillStatus = 'paused';
+      current.updatedAt = new Date().toISOString();
+      void save();
+      recordEvent('warn', `WhatsApp paused history backfill for #${current.slot} ${current.name} at ${current.historyBackfillProgress ?? 0}%${explicit ? '' : ' after no new history arrived'}`, {
+        instanceId: id,
+        locationId: current.locationId
+      });
+      return;
+    }
     const count = current.historyBackfillCount || 0;
     delete current.historyBackfillSince;
     current.historyBackfillStatus = 'complete';
+    current.historyBackfillProgress = 100;
     current.updatedAt = new Date().toISOString();
     void save();
     recordEvent('info', `WhatsApp history backfill finished for #${current.slot} ${current.name}: ${count} messages from the last ${current.historyBackfillDays || 1} days were received`, {
@@ -380,6 +394,7 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
       qr: null,
       lastError: null,
       linkedAt: newAccount || !meta.linkedAt ? new Date().toISOString() : meta.linkedAt,
+      ...(meta.historyBackfillSince ? { historyBackfillStatus: 'syncing' as const } : {}),
       ...(newAccount ? { warmupFrom: null, restrictedUntil: null } : {})
     });
     recordEvent('info', newAccount ? `WhatsApp connected as ${maskPhone(phone)}, a different number than before; its warm-up starts now` : `WhatsApp connected as ${maskPhone(phone)}`, context);
@@ -446,7 +461,7 @@ async function handleConnectionUpdate(id: string, session: Session, update: Part
 }
 
 function scheduleReconnect(id: string, delayMs: number, reason: string | null) {
-  updateInstance(id, { status: 'reconnecting', lastError: reason });
+  updateInstance(id, { status: 'reconnecting', qr: null, lastError: reason });
   clearReconnect(id);
   const timer = setTimeout(() => {
     reconnectTimers.delete(id);

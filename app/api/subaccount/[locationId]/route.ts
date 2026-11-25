@@ -11,9 +11,14 @@ type WorkerNumber = {
   phone?: string | null;
   status: string;
   qr?: string | null;
+  lastError?: string | null;
   isDefault: boolean;
   restrictedUntil: number | null;
   protection?: { warmingUp: boolean };
+  historyBackfillStatus: 'awaiting-pairing' | 'syncing' | 'paused' | 'complete' | null;
+  historyBackfillCount: number;
+  historyBackfillDays: number | null;
+  historyBackfillProgress: number | null;
 };
 type WorkerLocation = { locationId: string; limit: number; ghlReady: boolean; numbers: WorkerNumber[] };
 
@@ -39,9 +44,14 @@ function view(location: WorkerLocation) {
       phone: n.phone ?? null,
       status: n.status,
       qr: n.qr ?? null,
+      lastError: n.lastError ?? null,
       isDefault: n.isDefault,
       restricted: Boolean(n.restrictedUntil),
-      warmingUp: Boolean(n.protection?.warmingUp)
+      warmingUp: Boolean(n.protection?.warmingUp),
+      historyBackfillStatus: n.historyBackfillStatus,
+      historyBackfillCount: n.historyBackfillCount,
+      historyBackfillDays: n.historyBackfillDays,
+      historyBackfillProgress: n.historyBackfillProgress
     }))
   };
 }

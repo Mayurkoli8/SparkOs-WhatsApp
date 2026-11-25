@@ -87,6 +87,7 @@ const publicInstance = (instance: InstanceRecord) => {
     historyBackfillStatus: instance.historyBackfillStatus || null,
     historyBackfillCount: instance.historyBackfillCount || 0,
     historyBackfillDays: instance.historyBackfillDays || null,
+    historyBackfillProgress: instance.historyBackfillProgress ?? null,
     slot: slot ?? null,
     isDefault: Boolean(isDefault),
     linkedAt: linkedAt || null,
